@@ -2,33 +2,10 @@
 dl-service/training/train_and_export.py
 Fine-tunes EfficientNet-B0 on APTOS 2019 retinopathy dataset.
 Exports INT8 quantized model + ONNX alternative.
-
 Dataset: APTOS 2019 Blindness Detection (Kaggle)
   https://www.kaggle.com/competitions/aptos2019-blindness-detection
   Place images in: datasets/aptos/train_images/
   Place labels in: datasets/aptos/train.csv  (columns: id_code, diagnosis)
-
-Classes (5):
-  0 = No DR          (sin retinopatía)
-  1 = Mild           (leve)
-  2 = Moderate       (moderada)
-  3 = Severe         (severa)
-  4 = Proliferative  (proliferativa — máximo riesgo)
-
-Clinical justification:
-  Patients already diagnosed with diabetes via PIMA tabular model
-  can now have their retinal images analyzed to detect diabetic
-  retinopathy severity — same disease, complementary evidence.
-
-Usage (locally, before docker build):
-  pip install torch torchvision efficientnet_pytorch scikit-learn \
-              pandas numpy Pillow tqdm mlflow onnx onnxruntime
-  python training/train_and_export.py
-
-Outputs:
-  models/dl_model.onnx    ← loaded by FastAPI (preferred, ~18MB)
-  models/dl_q8.pth        ← INT8 fallback
-  models/dl_metadata.json ← class names, thresholds, metrics
 """
 import json, pathlib, warnings, time
 warnings.filterwarnings("ignore")
