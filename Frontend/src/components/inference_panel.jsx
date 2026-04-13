@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { inferAPI } from '../services/api'
+import { inferAPI } from '../../services/api'
 import { useInferenceSocket } from '../hooks/useInferenceSocket'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts'
 import toast from 'react-hot-toast'

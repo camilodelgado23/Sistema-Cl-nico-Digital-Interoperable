@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
-import { adminAPI } from '../services/api'
-import Layout from '../components/Layout'
+import { adminAPI } from '../../services/api'
+import Layout from '../../components/Layout'
 import toast from 'react-hot-toast'
 import './AdminPanel.css'
 
