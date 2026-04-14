@@ -62,8 +62,8 @@ async def create_user(
 
     access_key = secrets.token_hex(16)
     permission_key = secrets.token_hex(16)
-    ph = hash_password(body.password)
-
+    ph = hash_password(body.password[:72])
+    
     row = await db.fetchrow(
         """INSERT INTO users (username, password_hash, role, access_key, permission_key)
            VALUES ($1, $2, $3, $4, $5)

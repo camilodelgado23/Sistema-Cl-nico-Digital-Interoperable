@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
 import asyncpg, uuid
-
+from datetime import date
+from datetime import datetime
 from core.config import get_db
 from core.auth import require_authenticated, require_medico, require_admin
 from core.audit import log_audit
@@ -34,11 +35,12 @@ async def create_patient(
     db: asyncpg.Connection = Depends(get_db),
 ):
     enc_doc = await encrypt_value(db, body.identification_doc)
+    birth_date_obj = datetime.strptime(body.birth_date, "%Y-%m-%d").date() if isinstance(body.birth_date, str) else body.birth_date
     row = await db.fetchrow(
         """INSERT INTO patients (owner_id, name, birth_date, identification_doc, ground_truth)
-           VALUES ($1::uuid, $2, $3::date, $4, $5)
-           RETURNING id, name, birth_date, created_at""",
-        str(user["id"]), body.name, body.birth_date, enc_doc, body.ground_truth,
+        VALUES ($1::uuid, $2, $3, $4, $5)
+        RETURNING id, name, birth_date, created_at""",
+        str(user["id"]), body.name, birth_date_obj, enc_doc, body.ground_truth,
     )
     pid = str(row["id"])
     await log_audit(db, str(user["id"]), user["role"], "CREATE_PATIENT", "Patient",

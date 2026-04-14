@@ -29,27 +29,31 @@ services:
 
   # ── FRONTEND ───────────────────────────────────────────────────────────────
   frontend:
-    build: ./frontend
-    expose:
-      - "3000"
-    networks:
-      - clinical_net
-    restart: unless-stopped
+      build: ./frontend
+      expose:
+        - "3000"
+      ports:
+        - "3000:3000"    # ← AGREGAR
+      networks:
+        - clinical_net
+      restart: unless-stopped
 
   # ── BACKEND ────────────────────────────────────────────────────────────────
   backend:
-    build: ./backend
-    expose:
-      - "8000"
-    env_file: ./backend/.env
-    networks:
-      - clinical_net
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+      build: ./backend
+      expose:
+        - "8000"
+      ports:                    # ← AGREGAR ESTO
+        - "8000:8000"           # ← AGREGAR ESTO
+      env_file: ./backend/.env
+      networks:
+        - clinical_net
+      restart: unless-stopped
+      healthcheck:
+        test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+        interval: 30s
+        timeout: 10s
+        retries: 3
 
   # ── FHIR SERVER ────────────────────────────────────────────────────────────
   fhir-server:
@@ -68,6 +72,8 @@ services:
     build: ./ml-service
     expose:
       - "8001"
+    ports:
+      - "8001:8001"
     env_file: ./ml-service/.env
     networks:
       - clinical_net
@@ -78,6 +84,8 @@ services:
     build: ./dl-service
     expose:
       - "8002"
+    ports:
+      - "8002:8002"
     env_file: ./dl-service/.env
     networks:
       - clinical_net
@@ -85,32 +93,37 @@ services:
 
   # ── ORCHESTRATOR ───────────────────────────────────────────────────────────
   orchestrator:
-    build: ./orchestrator
-    expose:
-      - "8003"
-    env_file: ./orchestrator/.env
-    depends_on:
-      - ml-service
-      - dl-service
-    networks:
-      - clinical_net
-    restart: unless-stopped
+      build: ./orchestrator
+      expose:
+        - "8003"
+      ports:
+        - "8003:8003"
+      env_file: ./orchestrator/.env
+      depends_on:
+        - ml-service
+        - dl-service
+      networks:
+        - clinical_net
+      restart: unless-stopped
 
   # ── MINIO ──────────────────────────────────────────────────────────────────
   minio:
-    image: minio/minio
-    command: server /data --console-address ":9001"
-    expose:
-      - "9000"
-      - "9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio_data:/data
-    networks:
-      - clinical_net
-    restart: unless-stopped
+      image: minio/minio
+      command: server /data --console-address ":9001"
+      expose:
+        - "9000"
+        - "9001"
+      ports:
+        - "9000:9000"    # ← AGREGAR
+        - "9001:9001"    # ← AGREGAR (consola web de MinIO)
+      environment:
+        MINIO_ROOT_USER: minioadmin
+        MINIO_ROOT_PASSWORD: minioadmin
+      volumes:
+        - minio_data:/data
+      networks:
+        - clinical_net
+      restart: unless-stopped
 
   minio-init:
     image: minio/mc

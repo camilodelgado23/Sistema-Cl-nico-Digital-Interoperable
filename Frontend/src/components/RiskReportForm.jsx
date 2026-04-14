@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { fhirAPI } from '../../services/api'
+import { fhirAPI } from '../services/api'
 import toast from 'react-hot-toast'
 
 export default function RiskReportForm({ report, onSigned }) {
