@@ -13,6 +13,9 @@ from core.config import get_db
 from core.auth import require_authenticated, require_medico, require_admin
 from core.audit import log_audit
 from core.crypto import encrypt_value, decrypt_value
+from fastapi import UploadFile, File, Form
+from minio import Minio
+import io as _io
 
 router = APIRouter(prefix="/fhir", tags=["FHIR"])
 
@@ -435,3 +438,57 @@ def _check_patient_access(user: dict, row):
 def _check_subject_access(user: dict, subject_id: str):
     if user["role"] == "PACIENTE" and str(user["id"]) != subject_id:
         raise HTTPException(403, "Solo puede ver sus propios datos")
+    
+# Agrega la función helper y el endpoint al FINAL del archivo fhir.py:
+ 
+def _get_minio():
+    from core.config import settings
+    return Minio(
+        settings.MINIO_ENDPOINT,
+        access_key=settings.MINIO_ACCESS_KEY,
+        secret_key=settings.MINIO_SECRET_KEY,
+        secure=False,
+    )
+ 
+@router.post("/Media/upload", status_code=201)
+async def upload_media_file(
+    request: Request,
+    patient_id: str = Form(...),
+    modality: str = Form("FUNDUS"),
+    file: UploadFile = File(...),
+    user: dict = Depends(require_medico),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    allowed = {"image/jpeg", "image/png", "image/jpg"}
+    if file.content_type not in allowed:
+        raise HTTPException(400, "Solo se permiten imágenes JPG/PNG")
+ 
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(400, "Imagen demasiado grande (máx 10 MB)")
+ 
+    from core.config import settings
+    minio_key = f"patients/{patient_id}/{file.filename}"
+    mc = _get_minio()
+ 
+    if not mc.bucket_exists(settings.MINIO_BUCKET):
+        mc.make_bucket(settings.MINIO_BUCKET)
+ 
+    mc.put_object(
+        settings.MINIO_BUCKET,
+        minio_key,
+        _io.BytesIO(content),
+        length=len(content),
+        content_type=file.content_type,
+    )
+ 
+    enc_key = await encrypt_value(db, minio_key)
+    row = await db.fetchrow(
+        """INSERT INTO images (patient_id, minio_key, modality, uploaded_by)
+           VALUES ($1::uuid, $2, $3, $4::uuid)
+           RETURNING id, patient_id, modality, created_at""",
+        patient_id, enc_key, modality, str(user["id"]),
+    )
+    await log_audit(db, str(user["id"]), user["role"], "UPLOAD_IMAGE", "Media",
+                    str(row["id"]), request.client.host if request.client else None)
+    return _media_to_fhir(row, minio_key)

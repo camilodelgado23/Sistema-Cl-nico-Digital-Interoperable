@@ -47,6 +47,17 @@ export const fhirAPI = {
   listMedia: (subject) =>
     api.get('/fhir/Media', { params: { subject } }),
 
+  // Upload real de imagen desde el frontend (multipart/form-data)
+  uploadImage: (patientId, file, modality = 'FUNDUS') => {
+    const fd = new FormData()
+    fd.append('patient_id', patientId)
+    fd.append('modality', modality)
+    fd.append('file', file)
+    return api.post('/fhir/Media/upload', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    })
+  },
+
   listRiskReports: (subject) =>
     api.get('/fhir/RiskAssessment', { params: { subject } }),
 

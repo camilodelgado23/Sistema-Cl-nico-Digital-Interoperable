@@ -1,54 +1,14 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { Toaster } from 'react-hot-toast'
-import { useAuthStore } from './store/auth'
 
+import App from './App'
 import './index.css'
-import Login         from './views/Login'
-import Dashboard     from './views/Dashboard'
-import PatientDetail from './views/PatientDetail'
-import AdminPanel    from './views/AdminPanel'
-
-// Componente para proteger rutas privadas
-function PrivateRoute({ children, requiredRole }) {
-  const { token, role } = useAuthStore()
-
-  if (!token) return <Navigate to="/login" replace />
-
-  if (requiredRole) {
-    const isAdmin = role === 'ADMIN'
-    const roleOk  = role === requiredRole || isAdmin
-    if (!roleOk) return <Navigate to="/dashboard" replace />
-  }
-
-  return children
-}
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <BrowserRouter>
-      <Routes>
-        <Route path="/login" element={<Login />} />
+    <App />
 
-        <Route path="/dashboard" element={
-          <PrivateRoute><Dashboard /></PrivateRoute>
-        } />
-
-        <Route path="/patients/:id" element={
-          <PrivateRoute><PatientDetail /></PrivateRoute>
-        } />
-
-        <Route path="/admin" element={
-          <PrivateRoute requiredRole="ADMIN"><AdminPanel /></PrivateRoute>
-        } />
-
-        {/* Cualquier otra ruta → dashboard */}
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
-    </BrowserRouter>
-
-    {/* Toast notifications globales */}
     <Toaster
       position="top-right"
       toastOptions={{
