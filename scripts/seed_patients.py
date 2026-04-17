@@ -21,8 +21,8 @@ import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
 API_URL    = os.getenv("API_URL",    "http://localhost:8000")
-ACCESS_KEY = os.getenv("ACCESS_KEY", "medico1-key-001")
-PERM_KEY   = os.getenv("PERM_KEY",   "medico1-perm-key-001")
+ACCESS_KEY = os.getenv("ACCESS_KEY", "d13e4618e587c3d42ece96cadcc30b37")
+PERM_KEY   = os.getenv("PERM_KEY",   "d7146f286875d1e9c3018e18cff4750d")
 
 MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT",   "localhost:9000")
 MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY",  "minioadmin")

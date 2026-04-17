@@ -7,8 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from typing import Optional
 import asyncpg, uuid
-from datetime import date
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from core.config import get_db
 from core.auth import require_authenticated, require_medico, require_admin
 from core.audit import log_audit
@@ -16,6 +15,7 @@ from core.crypto import encrypt_value, decrypt_value
 from fastapi import UploadFile, File, Form
 from minio import Minio
 import io as _io
+from minio import Minio as _Minio
 
 router = APIRouter(prefix="/fhir", tags=["FHIR"])
 
@@ -226,6 +226,7 @@ async def list_media(
     subject: str = Query(...),
     limit: int = Query(10, ge=1, le=50),
     offset: int = Query(0, ge=0),
+    presign: bool = Query(False),
     user: dict = Depends(require_authenticated),
     db: asyncpg.Connection = Depends(get_db),
 ):
@@ -237,11 +238,24 @@ async def list_media(
            ORDER BY i.created_at DESC LIMIT $2 OFFSET $3""",
         subject, limit, offset,
     )
+    total = await db.fetchval(
+        "SELECT COUNT(*) FROM images WHERE patient_id = $1::uuid AND deleted_at IS NULL", subject
+    )
     result = []
+    mc = _get_minio() if presign else None
     for r in rows:
         plain_key = await decrypt_value(db, r["minio_key"])
-        result.append(_media_to_fhir(r, plain_key))
-    return {"total": len(result), "limit": limit, "offset": offset, "entry": result}
+        entry = _media_to_fhir(r, plain_key)
+        if presign and mc:
+            try:
+                from core.config import settings as _s
+                url = mc.presigned_get_object(_s.MINIO_BUCKET, plain_key, expires=timedelta(hours=1))
+                entry["presigned_url"] = url
+                entry["content"]["url"] = url
+            except Exception as e:
+                entry["presigned_url"] = None
+        result.append(entry)
+    return {"total": total, "limit": limit, "offset": offset, "entry": result}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -492,3 +506,129 @@ async def upload_media_file(
     await log_audit(db, str(user["id"]), user["role"], "UPLOAD_IMAGE", "Media",
                     str(row["id"]), request.client.host if request.client else None)
     return _media_to_fhir(row, minio_key)
+
+def _minio_client():
+    from core.config import settings
+    return _Minio(
+        settings.MINIO_ENDPOINT,
+        access_key=settings.MINIO_ACCESS_KEY,
+        secret_key=settings.MINIO_SECRET_KEY,
+        secure=False,
+    )
+
+
+@router.get("/Media/{media_id}/url")
+async def get_media_presigned_url(
+    media_id: str,
+    user: dict = Depends(require_authenticated),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    from core.config import settings
+    from datetime import timedelta
+
+    row = await db.fetchrow(
+        """SELECT id, patient_id, minio_key, modality 
+           FROM images 
+           WHERE id = $1::uuid AND deleted_at IS NULL""",
+        media_id,
+    )
+
+    if not row:
+        raise HTTPException(404, "Imagen no encontrada")
+
+    plain_key = await decrypt_value(db, row["minio_key"])
+    mc = _minio_client()
+
+    try:
+        url = mc.presigned_get_object(
+            settings.MINIO_BUCKET,
+            plain_key,
+            expires=timedelta(hours=1),
+        )
+    except Exception as e:
+        raise HTTPException(500, f"Error generando URL: {e}")
+
+    return {
+        "id": media_id,
+        "url": url,
+        "modality": row["modality"],
+        "expires_in": 3600,
+    }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# GET /fhir/RiskAssessment/{rid}  — reporte individual
+# ──────────────────────────────────────────────────────────────────────────────
+@router.get("/RiskAssessment/{rid}")
+async def get_risk_assessment(
+    rid: str,
+    user: dict = Depends(require_authenticated),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    row = await db.fetchrow(
+        """SELECT id, patient_id, model_type, risk_score, risk_category,
+                  is_critical, shap_json, doctor_action, doctor_notes,
+                  rejection_reason, signed_by, signed_at, created_at
+           FROM risk_reports
+           WHERE id = $1::uuid AND deleted_at IS NULL""",
+        rid,
+    )
+    if not row:
+        raise HTTPException(404, "RiskReport no encontrado")
+    _check_subject_access(user, str(row["patient_id"]))
+    return _risk_to_fhir(row)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# POST /fhir/Patient/full  — crea paciente + observaciones en un solo call
+# ──────────────────────────────────────────────────────────────────────────────
+class ObsItem(BaseModel):
+    loinc_code: str
+    value: float
+    unit: str
+
+class PatientFull(BaseModel):
+    name: str
+    birth_date: str
+    identification_doc: str
+    ground_truth: Optional[int] = None
+    observations: list[ObsItem] = []
+
+@router.post("/Patient/full", status_code=201)
+async def create_patient_full(
+    body: PatientFull,
+    request: Request,
+    user: dict = Depends(require_medico),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """Crea paciente FHIR completo con observaciones LOINC en una sola llamada."""
+    enc_doc = await encrypt_value(db, body.identification_doc)
+    birth_date_obj = datetime.strptime(body.birth_date, "%Y-%m-%d").date()
+    row = await db.fetchrow(
+        """INSERT INTO patients (owner_id, name, birth_date, identification_doc, ground_truth)
+           VALUES ($1::uuid, $2, $3, $4, $5)
+           RETURNING id, name, birth_date, created_at""",
+        str(user["id"]), body.name, birth_date_obj, enc_doc, body.ground_truth,
+    )
+    pid = str(row["id"])
+    obs_created = []
+    for obs in body.observations:
+        obs_row = await db.fetchrow(
+            """INSERT INTO observations (patient_id, loinc_code, value, unit, status)
+               VALUES ($1::uuid, $2, $3, $4, 'final')
+               RETURNING id, loinc_code, value, unit""",
+            pid, obs.loinc_code, obs.value, obs.unit,
+        )
+        obs_created.append(dict(obs_row))
+    await log_audit(
+        db, str(user["id"]), user["role"], "CREATE_PATIENT", "Patient",
+        pid, request.client.host if request.client else None,
+        detail={"observations_count": len(obs_created)},
+    )
+    return {
+        "resourceType": "Patient",
+        "id": pid,
+        "name": row["name"],
+        "birthDate": str(row["birth_date"]),
+        "meta": {"createdAt": row["created_at"].isoformat()},
+        "observations_created": len(obs_created),
+    }

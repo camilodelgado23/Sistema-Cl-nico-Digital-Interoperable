@@ -2,29 +2,28 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { fhirAPI } from '../services/api'
 import { useAuthStore } from '../store/auth'
+import CreatePatientModal from '../components/CreatePatientModal'
 import './Dashboard.css'
- 
-// ── Helpers ──────────────────────────────────────────────────────────────────
-const calcAge = (birthDate) => {
-  if (!birthDate) return '—'
-  const diff = Date.now() - new Date(birthDate).getTime()
-  return Math.floor(diff / (365.25 * 24 * 3600 * 1000))
+
+const calcAge = (bd) => {
+  if (!bd) return '—'
+  return Math.floor((Date.now() - new Date(bd)) / (365.25 * 24 * 3600 * 1000))
 }
- 
+
 const RISK_LABEL = {
-  LOW: { label: 'Bajo', cls: 'risk-low' },
-  MEDIUM: { label: 'Medio', cls: 'risk-medium' },
-  HIGH: { label: 'Alto', cls: 'risk-high' },
-  CRITICAL: { label: 'Crítico', cls: 'risk-critical' },
+  LOW:      { label:'Bajo',    cls:'risk-low'      },
+  MEDIUM:   { label:'Medio',   cls:'risk-medium'   },
+  HIGH:     { label:'Alto',    cls:'risk-high'     },
+  CRITICAL: { label:'Crítico', cls:'risk-critical' },
 }
- 
-const FILTERS = ['TODOS', 'PENDIENTE', 'CRÍTICO', 'SIN ANÁLISIS']
- 
-// ── Component ─────────────────────────────────────────────────────────────────
+
+const FILTERS = ['TODOS','PENDIENTE','CRÍTICO','SIN ANÁLISIS']
+
 export default function Dashboard() {
-  const navigate   = useNavigate()
-  const { user }   = useAuthStore()
- 
+  const navigate       = useNavigate()
+  // FIX 1: usar 'role' directamente, no 'user'
+  const { role }       = useAuthStore()
+
   const [patients,   setPatients]   = useState([])
   const [total,      setTotal]      = useState(0)
   const [loading,    setLoading]    = useState(true)
@@ -32,74 +31,76 @@ export default function Dashboard() {
   const [filter,     setFilter]     = useState('TODOS')
   const [page,       setPage]       = useState(0)
   const [criticals,  setCriticals]  = useState(0)
- 
+  const [showCreate, setShowCreate] = useState(false)
+
   const LIMIT = 10
- 
+
+  // FIX 2: búsqueda y filtros se mandan al backend como params,
+  // no se filtran client-side (eso causaba los nombres repetidos)
   const load = useCallback(async () => {
     setLoading(true)
     try {
       const params = { limit: LIMIT, offset: page * LIMIT }
+
+      // Filtros server-side
+      if (search.trim())            params.search        = search.trim()
+      if (filter === 'PENDIENTE')   params.pending_only  = true
+      if (filter === 'CRÍTICO')     params.risk_category = 'CRITICAL'
+      if (filter === 'SIN ANÁLISIS') params.no_analysis  = true
+
       const { data } = await fhirAPI.listPatients(params)
-      setTotal(data.total)
- 
-      let entries = data.entry || []
- 
-      // Client-side search
-      if (search.trim()) {
-        const q = search.toLowerCase()
-        entries = entries.filter(p =>
-          p.name?.toLowerCase().includes(q) || p.id?.toLowerCase().includes(q)
-        )
-      }
- 
-      // Client-side filter
-      if (filter === 'PENDIENTE') {
-        entries = entries.filter(p => Number(p.pending_reports) > 0)
-      } else if (filter === 'CRÍTICO') {
-        entries = entries.filter(p => p.last_risk_category === 'CRITICAL')
-      } else if (filter === 'SIN ANÁLISIS') {
-        entries = entries.filter(p => !p.last_risk_category)
-      }
- 
-      setPatients(entries)
-      setCriticals(data.entry?.filter(p => p.last_risk_category === 'CRITICAL' && Number(p.pending_reports) > 0).length || 0)
-    } catch (e) {
-      console.error(e)
-    } finally {
-      setLoading(false)
-    }
+      setTotal(data.total || 0)
+      setPatients(data.entry || [])
+      setCriticals(
+        (data.entry || []).filter(
+          p => p.last_risk_category === 'CRITICAL' && Number(p.pending_reports) > 0
+        ).length
+      )
+    } catch (e) { console.error(e) }
+    finally { setLoading(false) }
   }, [page, search, filter])
- 
+
   useEffect(() => { load() }, [load])
- 
-  const roleLabel = { ADMIN: 'Administrador', MEDICO: 'Médico', PACIENTE: 'Paciente' }
- 
+
+  const roleLabel = { ADMIN:'Administrador', MEDICO:'Médico Especialista', PACIENTE:'Paciente' }
   const totalPages = Math.ceil(total / LIMIT)
- 
+
   return (
     <div className="dashboard">
-      {/* Header */}
+      {showCreate && (
+        <CreatePatientModal
+          onClose={() => setShowCreate(false)}
+          onCreated={() => { setShowCreate(false); load() }}
+        />
+      )}
+
       <div className="dashboard-header">
         <div>
-          <h1 style={{ marginBottom: '0.25rem' }}>Pacientes</h1>
-          <p style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
-            {total} registros · {roleLabel[user?.role] || user?.role}
+          <h1 style={{ marginBottom:'0.25rem' }}>Pacientes</h1>
+          <p style={{ color:'var(--text-secondary)', fontSize:'0.875rem' }}>
+            {total} registros · {roleLabel[role] || role}
           </p>
         </div>
- 
-        {criticals > 0 && (
-          <div className="alert-banner">
-            <span>🔴</span>
-            <span>{criticals} alerta{criticals > 1 ? 's' : ''} crítica{criticals > 1 ? 's' : ''} sin firmar</span>
-          </div>
-        )}
+        <div style={{ display:'flex', gap:'0.75rem', alignItems:'center', flexWrap:'wrap' }}>
+          {criticals > 0 && (
+            <div className="alert-banner">
+              <span>🔴</span>
+              <span>{criticals} alerta{criticals > 1 ? 's' : ''} crítica{criticals > 1 ? 's' : ''} sin firmar</span>
+            </div>
+          )}
+          {/* FIX 3: botón solo para MEDICO */}
+          {role === 'MEDICO' && (
+            <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
+              + Nuevo paciente
+            </button>
+          )}
+        </div>
       </div>
- 
-      {/* Toolbar */}
+
       <div className="dashboard-toolbar">
         <input
           className="input"
-          style={{ flex: 1, minWidth: 220, maxWidth: 400 }}
+          style={{ flex:1, minWidth:220, maxWidth:400 }}
           placeholder="Buscar por nombre o ID…"
           value={search}
           onChange={e => { setSearch(e.target.value); setPage(0) }}
@@ -116,8 +117,7 @@ export default function Dashboard() {
           ))}
         </div>
       </div>
- 
-      {/* Table */}
+
       <div className="card dashboard-table-card">
         <div className="table-wrap">
           <table className="table">
@@ -134,25 +134,23 @@ export default function Dashboard() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-tertiary)' }}>
-                    Cargando pacientes…
+                  <td colSpan={6} style={{ textAlign:'center', padding:'2rem', color:'var(--text-tertiary)' }}>
+                    Cargando…
                   </td>
                 </tr>
               ) : patients.length === 0 ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: 'var(--text-tertiary)' }}>
+                  <td colSpan={6} style={{ textAlign:'center', padding:'2rem', color:'var(--text-tertiary)' }}>
                     No se encontraron pacientes
                   </td>
                 </tr>
               ) : patients.map(p => {
-                const risk   = RISK_LABEL[p.last_risk_category]
+                const risk    = RISK_LABEL[p.last_risk_category]
                 const pending = Number(p.pending_reports) > 0
- 
                 return (
                   <tr
                     key={p.id}
-                    className="clickable"
-                    style={{ cursor: 'pointer' }}
+                    style={{ cursor:'pointer' }}
                     onClick={() => navigate(`/patients/${p.id}`)}
                   >
                     <td>
@@ -161,15 +159,13 @@ export default function Dashboard() {
                         title={risk ? risk.label : 'Sin análisis'}
                       />
                     </td>
-                    <td style={{ fontWeight: 500 }}>{p.name}</td>
+                    <td style={{ fontWeight:500 }}>{p.name}</td>
                     <td>
-                      <span style={{ color: 'var(--cyan)', fontWeight: 600 }}>
-                        {calcAge(p.birth_date)}
-                      </span>{' '}
-                      <span style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>a</span>
+                      <span style={{ color:'var(--cyan)', fontWeight:600 }}>{calcAge(p.birth_date)}</span>
+                      {' '}<span style={{ color:'var(--text-tertiary)', fontSize:'0.8rem' }}>a</span>
                     </td>
                     <td>
-                      <code style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
+                      <code style={{ fontSize:'0.75rem', color:'var(--text-tertiary)' }}>
                         {p.id?.slice(0, 8)}…
                       </code>
                     </td>
@@ -179,19 +175,18 @@ export default function Dashboard() {
                           {risk.label}
                         </span>
                       ) : (
-                        <span style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem',
-                          fontFamily: 'var(--font-mono)', letterSpacing: '0.05em' }}>
+                        <span style={{ color:'var(--text-tertiary)', fontSize:'0.8rem', fontFamily:'var(--font-mono)', letterSpacing:'0.05em' }}>
                           SIN ANÁLISIS
                         </span>
                       )}
                     </td>
                     <td>
                       {pending ? (
-                        <span style={{ color: 'var(--danger)', fontWeight: 600, fontSize: '0.8rem' }}>
+                        <span style={{ color:'var(--danger)', fontWeight:600, fontSize:'0.8rem' }}>
                           ⚠ Pendiente
                         </span>
                       ) : (
-                        <span style={{ color: 'var(--success)', fontSize: '0.8rem' }}>
+                        <span style={{ color:'var(--success)', fontSize:'0.8rem' }}>
                           ✓ Al día
                         </span>
                       )}
@@ -203,8 +198,7 @@ export default function Dashboard() {
           </table>
         </div>
       </div>
- 
-      {/* Pagination */}
+
       {totalPages > 1 && (
         <div className="pagination">
           <button
@@ -214,7 +208,7 @@ export default function Dashboard() {
           >
             ← Anterior
           </button>
-          <span style={{ color: 'var(--text-secondary)', fontSize: '0.875rem' }}>
+          <span style={{ color:'var(--text-secondary)', fontSize:'0.875rem' }}>
             Página {page + 1} de {totalPages}
           </span>
           <button

@@ -2,15 +2,16 @@
 backend/main.py — FastAPI app principal
 """
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 import httpx
+import asyncpg
 
-from core.config import settings, get_pool, close_pool
+from core.config import settings, get_pool, close_pool, get_db
 from core.auth import require_medico
 from routers.auth import router as auth_router
 from routers.fhir import router as fhir_router
@@ -73,7 +74,6 @@ async def health():
     return {"status": "ok", "service": "backend", "version": "2.0.0"}
 
 # ── Proxy a orquestador (rate-limited) ────────────────────────────────────────
-from fastapi import Depends
 
 @app.post("/infer", tags=["inference"])
 @limiter.limit("10/minute")
@@ -99,3 +99,71 @@ async def get_inference_status(
     async with httpx.AsyncClient(timeout=10) as client:
         r = await client.get(f"{settings.ORCHESTRATOR_URL}/infer/{task_id}")
     return r.json()
+
+
+# ── NUEVO ENDPOINT: RESULT ────────────────────────────────────────────────────
+
+@app.get("/infer/{task_id}/result", tags=["inference"])
+async def get_inference_result(
+    task_id: str,
+    user: dict = Depends(require_medico),
+    db: asyncpg.Connection = Depends(get_db),  # ✅ FIX: get_db no get_pool
+):
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.get(f"{settings.ORCHESTRATOR_URL}/infer/{task_id}")
+    task = r.json()
+
+    # Si no está listo, devolver estado tal cual
+    if task.get("status") != "DONE" or not task.get("result_id"):
+        return task
+
+    result_id = task["result_id"]
+
+    row = await db.fetchrow(
+        """SELECT id, patient_id, model_type, risk_score, risk_category,
+                  is_critical, shap_json, doctor_action, signed_at, created_at
+           FROM risk_reports 
+           WHERE id = $1::uuid AND deleted_at IS NULL""",
+        result_id,
+    )
+
+    if not row:
+        return task
+
+    snomed_map = {
+        "LOW": "281414001",
+        "MEDIUM": "281415000",
+        "HIGH": "281416004",
+        "CRITICAL": "24484000",
+    }
+
+    cat = row["risk_category"] or "LOW"
+
+    return {
+        **task,
+        "result": {
+            "id": str(row["id"]),
+            "patient_id": str(row["patient_id"]),
+            "model_type": row["model_type"],
+            "risk_score": float(row["risk_score"]) if row["risk_score"] else None,
+            "risk_category": row["risk_category"],
+            "is_critical": row["is_critical"],
+            "shap_values": row["shap_json"],
+            "doctor_action": row["doctor_action"],
+            "signed_at": row["signed_at"].isoformat() if row["signed_at"] else None,
+            "prediction": [
+                {
+                    "probabilityDecimal": float(row["risk_score"]) if row["risk_score"] else None,
+                    "qualitativeRisk": {
+                        "coding": [
+                            {
+                                "system": "http://snomed.info/sct",
+                                "code": snomed_map.get(cat, "281414001"),
+                                "display": cat,
+                            }
+                        ]
+                    },
+                }
+            ],
+        },
+    }

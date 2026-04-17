@@ -168,13 +168,15 @@ async def predict(body: PredictRequest):
     if elapsed > 3000:
         print(f"⚠️  Inference took {elapsed:.0f}ms — exceeds 3s target")
 
+    auc = _metadata.get("metrics", {}).get("auc_roc")
+
     return PredictResponse(
         patient_id    = body.patient_id,
         risk_score    = round(proba, 4),
         risk_category = risk_cat,
         is_critical   = is_critical,
         shap_values   = shap_vals,
-        model_version = _metadata.get("metrics", {}).get("auc_roc", "unknown"),
+        model_version = str(auc) if auc is not None else "unknown",
         elapsed_ms    = round(elapsed, 1),
     )
 

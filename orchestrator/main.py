@@ -91,14 +91,13 @@ async def set_status(task_id: str, status: str,
     async with pool.acquire() as conn:
         await conn.execute(
             """UPDATE inference_queue
-               SET status = $1,
-                   completed_at = CASE WHEN $1 IN ('DONE','ERROR') THEN NOW() ELSE completed_at END,
+               SET status = $1::varchar,
+                   completed_at = CASE WHEN $1::varchar IN ('DONE','ERROR') THEN NOW() ELSE completed_at END,
                    result_id = COALESCE($2::uuid, result_id),
                    error_msg = COALESCE($3, error_msg)
                WHERE id = $4::uuid""",
             status, result_id, error_msg, task_id,
         )
-    # Push via WebSocket
     await ws_manager.broadcast(task_id, {
         "task_id": task_id, "status": status,
         "result_id": result_id, "error_msg": error_msg,
@@ -146,19 +145,24 @@ async def save_risk_report(patient_id: str, model_type: str,
 # ── Core inference runner ─────────────────────────────────────────────────────
 async def run_inference(task_id: str, patient_id: str,
                         model_type: str, requested_by: str):
-    async with sem:                          # blocks if 4 already running
+    async with sem:
         await set_status(task_id, "RUNNING")
         try:
-            url = ML_URL if model_type == "ML" else DL_URL
-            endpoint = "/ml/predict" if model_type == "ML" else "/dl/predict"
+            if model_type == "ML":
+                async with httpx.AsyncClient(timeout=TASK_TIMEOUT) as client:
+                    r = await client.post(
+                        f"{ML_URL}/ml/predict",
+                        json={"patient_id": patient_id},   # ✅ ML usa JSON
+                    )
+            else:  # ✅ FIX 3 — DL usa query params
+                async with httpx.AsyncClient(timeout=TASK_TIMEOUT) as client:
+                    r = await client.post(
+                        f"{DL_URL}/dl/predict",
+                        params={"patient_id": patient_id},  # 🔥 cambio clave
+                    )
 
-            async with httpx.AsyncClient(timeout=TASK_TIMEOUT) as client:
-                r = await client.post(
-                    f"{url}{endpoint}",
-                    json={"patient_id": patient_id},
-                )
-                r.raise_for_status()
-                result = r.json()
+            r.raise_for_status()
+            result = r.json()
 
             rid = await save_risk_report(patient_id, model_type, requested_by, result)
             await set_status(task_id, "DONE", result_id=rid)
@@ -171,15 +175,12 @@ async def run_inference(task_id: str, patient_id: str,
                     "patient_id": patient_id,
                     "risk_score": result.get("risk_score"),
                     "risk_category": result.get("risk_category"),
-                    "shap_values": result.get("shap_values"),
-                    "gradcam_url": result.get("gradcam_url"),
                 })
 
         except asyncio.TimeoutError:
             await set_status(task_id, "ERROR", error_msg="Timeout excedido (120s)")
         except Exception as e:
             await set_status(task_id, "ERROR", error_msg=str(e))
-
 
 # ── Multimodal (bono) ─────────────────────────────────────────────────────────
 async def run_multimodal(task_id: str, patient_id: str, requested_by: str):

@@ -1,19 +1,22 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './store/auth'
 
+import Layout        from './components/Layout'
 import Login         from './views/Login'
 import Dashboard     from './views/Dashboard'
 import PatientDetail from './views/PatientDetail'
 import AdminPanel    from './views/AdminPanel'
 import PatientView   from './views/PatientView'
 
-// Protección de rutas
+// 🔐 Protección
 function PrivateRoute({ children, roles }) {
   const { token, role } = useAuthStore()
 
+  const normalizedRole = role?.toUpperCase()
+
   if (!token) return <Navigate to="/login" replace />
 
-  if (roles && !roles.includes(role)) {
+  if (roles && !roles.includes(normalizedRole)) {
     return <Navigate to="/dashboard" replace />
   }
 
@@ -22,6 +25,7 @@ function PrivateRoute({ children, roles }) {
 
 export default function App() {
   const { role } = useAuthStore()
+  const normalizedRole = role?.toUpperCase()
 
   return (
     <BrowserRouter>
@@ -32,41 +36,50 @@ export default function App() {
 
         {/* Redirect raíz */}
         <Route path="/" element={
-          !role ? <Navigate to="/login" />
-          : role === 'PACIENTE' ? <Navigate to="/my-profile" />
-          : role === 'ADMIN' ? <Navigate to="/admin" />
-          : <Navigate to="/dashboard" />
+          !normalizedRole ? <Navigate to="/login" replace />
+          : normalizedRole === 'PACIENTE' ? <Navigate to="/my-profile" replace />
+          : normalizedRole === 'ADMIN' ? <Navigate to="/admin" replace />
+          : <Navigate to="/dashboard" replace />
         } />
 
-        {/* MÉDICO / ADMIN */}
-        <Route path="/dashboard" element={
-          <PrivateRoute roles={['MEDICO','ADMIN']}>
-            <Dashboard />
+        {/* 🔥 Layout como wrapper */}
+        <Route element={
+          <PrivateRoute>
+            <Layout />
           </PrivateRoute>
-        } />
+        }>
 
-        <Route path="/patients/:id" element={
-          <PrivateRoute roles={['MEDICO','ADMIN']}>
-            <PatientDetail />
-          </PrivateRoute>
-        } />
+          {/* MÉDICO / ADMIN */}
+          <Route path="/dashboard" element={
+            <PrivateRoute roles={['MEDICO','ADMIN']}>
+              <Dashboard />
+            </PrivateRoute>
+          } />
 
-        {/* ADMIN */}
-        <Route path="/admin" element={
-          <PrivateRoute roles={['ADMIN']}>
-            <AdminPanel />
-          </PrivateRoute>
-        } />
+          <Route path="/patients/:id" element={
+            <PrivateRoute roles={['MEDICO','ADMIN']}>
+              <PatientDetail />
+            </PrivateRoute>
+          } />
 
-        {/* PACIENTE */}
-        <Route path="/my-profile" element={
-          <PrivateRoute roles={['PACIENTE']}>
-            <PatientView />
-          </PrivateRoute>
-        } />
+          {/* ADMIN */}
+          <Route path="/admin" element={
+            <PrivateRoute roles={['ADMIN']}>
+              <AdminPanel />
+            </PrivateRoute>
+          } />
+
+          {/* PACIENTE */}
+          <Route path="/my-profile" element={
+            <PrivateRoute roles={['PACIENTE']}>
+              <PatientView />
+            </PrivateRoute>
+          } />
+
+        </Route>
 
         {/* fallback */}
-        <Route path="*" element={<Navigate to="/" />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
 
       </Routes>
     </BrowserRouter>
