@@ -9,6 +9,14 @@ function getAuthHeaders() {
   return { Authorization: `Bearer ${token}` };
 }
 
+// ✅ FIX: reemplaza el host interno de MinIO por localhost:9000
+// El backend firma con minio:9000 (host interno docker) pero el browser
+// necesita acceder por localhost:9000 (puerto expuesto en docker-compose)
+function fixMinioUrl(url) {
+  if (!url) return url;
+  return url.replace("http://minio:9000", "http://localhost:9000");
+}
+
 export default function PatientImages({ patientId, canUpload = false }) {
   const [images, setImages] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -39,7 +47,6 @@ export default function PatientImages({ patientId, canUpload = false }) {
     }
   }
 
-  // ✅ useEffect correcto
   useEffect(() => {
     loadImages();
   }, [patientId]);
@@ -101,9 +108,8 @@ export default function PatientImages({ patientId, canUpload = false }) {
             </button>
           </div>
 
-          {/* ✅ SOLO presigned_url */}
           <img
-            src={selected.presigned_url}
+            src={fixMinioUrl(selected.presigned_url)}
             alt="Imagen médica"
             style={styles.viewerImg}
             onError={(e) => {
@@ -164,7 +170,8 @@ export default function PatientImages({ patientId, canUpload = false }) {
       {images.length > 0 && (
         <div style={styles.grid}>
           {images.map((img) => {
-            const imgUrl = img.presigned_url; // ✅ SOLO esta
+            // ✅ FIX aplicado aquí
+            const imgUrl = fixMinioUrl(img.presigned_url);
 
             return (
               <div
@@ -179,7 +186,8 @@ export default function PatientImages({ patientId, canUpload = false }) {
                     style={styles.thumbnail}
                     onError={(e) => {
                       e.target.style.display = "none";
-                      e.target.nextSibling.style.display = "flex";
+                      const fallback = e.target.nextElementSibling;
+                      if (fallback) fallback.style.display = "flex";
                     }}
                   />
                 )}
@@ -208,7 +216,7 @@ export default function PatientImages({ patientId, canUpload = false }) {
   );
 }
 
-// ── Estilos (sin cambios) ────────────────────────────────────────────────────
+// ── Estilos ──────────────────────────────────────────────────────────────────
 const styles = {
   container: { padding: "16px 0" },
   uploadBar: {

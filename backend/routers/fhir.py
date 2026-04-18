@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from typing import Optional
 import asyncpg, uuid
 from datetime import date, datetime, timedelta
-from urllib.parse import urlparse
 from core.config import get_db, settings
 from core.auth import require_authenticated, require_medico, require_admin
 from core.audit import log_audit
@@ -16,6 +15,9 @@ from core.crypto import encrypt_value, decrypt_value
 from fastapi import UploadFile, File, Form
 from minio import Minio
 import io as _io
+import urllib3
+import boto3
+from botocore.config import Config
 
 router = APIRouter(prefix="/fhir", tags=["FHIR"])
 
@@ -24,39 +26,41 @@ router = APIRouter(prefix="/fhir", tags=["FHIR"])
 # HELPER MinIO
 # ──────────────────────────────────────────────────────────────────────────────
 def _minio_client() -> Minio:
-    """Cliente interno para subir/leer objetos (usa minio:9000 docker network)."""
+    """
+    Cliente interno para subir/leer objetos.
+    Usa minio:9000 (docker network) — conexión real garantizada.
+    """
     return Minio(
-        settings.MINIO_ENDPOINT,
+        settings.MINIO_ENDPOINT,          # minio:9000
         access_key=settings.MINIO_ACCESS_KEY,
         secret_key=settings.MINIO_SECRET_KEY,
         secure=False,
     )
 
 
-def _minio_public_client() -> Minio:
-    """
-    Cliente para generar presigned URLs.
-    ✅ Usa MINIO_PUBLIC_ENDPOINT (localhost:9000) para que la firma
-    incluya el host correcto y el browser pueda verificarla.
-    """
-    public = urlparse(settings.MINIO_PUBLIC_ENDPOINT)
-    return Minio(
-        public.netloc,                        # ej: localhost:9000
-        access_key=settings.MINIO_ACCESS_KEY,
-        secret_key=settings.MINIO_SECRET_KEY,
-        secure=public.scheme == "https",
-    )
-
-
 def _make_presigned_url(key: str) -> str:
-    """Genera presigned URL firmada con el host público."""
-    mc = _minio_public_client()
-    return mc.presigned_get_object(
-        settings.MINIO_BUCKET,
-        key,
-        expires=timedelta(hours=1),
-    )
+    """
+    Genera presigned URL con boto3 — SIN hacer conexión HTTP.
+    boto3.generate_presigned_url() es puro cálculo HMAC,
+    no intenta conectarse al endpoint.
 
+    El URL resultante tiene host=localhost:9000 ✅
+    MinIO lo verifica correctamente porque MINIO_SERVER_URL=http://localhost:9000
+    hace que MinIO espere exactamente ese host en la firma.
+    """
+    s3 = boto3.client(
+        "s3",
+        endpoint_url="http://localhost:9000",          # host que verá el browser
+        aws_access_key_id=settings.MINIO_ACCESS_KEY,
+        aws_secret_access_key=settings.MINIO_SECRET_KEY,
+        config=Config(signature_version="s3v4"),
+        region_name="us-east-1",                       # MinIO usa us-east-1 por defecto
+    )
+    return s3.generate_presigned_url(
+        "get_object",
+        Params={"Bucket": settings.MINIO_BUCKET, "Key": key},
+        ExpiresIn=3600,
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # PATIENT
@@ -285,7 +289,6 @@ async def list_media(
 
         if presign:
             try:
-                # ✅ Firmado con host público → browser puede verificar
                 url = _make_presigned_url(plain_key)
                 entry["presigned_url"] = url
                 entry["content"]["url"] = url
@@ -316,9 +319,8 @@ async def upload_media_file(
         raise HTTPException(400, "Imagen demasiado grande (máx 10 MB)")
 
     minio_key = f"patients/{patient_id}/{file.filename}"
+    mc = _minio_client()  # ✅ cliente interno para subir
 
-    # ✅ Subir con cliente interno (minio:9000)
-    mc = _minio_client()
     if not mc.bucket_exists(settings.MINIO_BUCKET):
         mc.make_bucket(settings.MINIO_BUCKET)
 

@@ -49,6 +49,10 @@ services:
     ports:
       - "8000:8000"
     env_file: ./backend/.env
+    # ✅ Permite que el contenedor resuelva localhost como el host real
+    # Necesario para que el cliente MinIO firme URLs con localhost:9000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     networks:
       - clinical_net
     restart: unless-stopped
@@ -121,8 +125,10 @@ services:
       MINIO_ROOT_PASSWORD: minioadmin
       MINIO_API_CORS_ALLOW_ORIGIN: "*"
       MINIO_API_CORS_ALLOW_METHODS: "GET,PUT,POST,DELETE,HEAD"
-      MINIO_SERVER_URL: "http://localhost:9000"        # ✅ AGREGAR ESTA
-      MINIO_BROWSER_REDIRECT_URL: "http://localhost:9001"  # ✅ Y ESTA
+      # ✅ MinIO firma las URLs con localhost:9000
+      # Así la firma coincide cuando el browser accede por localhost:9000
+      MINIO_SERVER_URL: "http://localhost:9000"
+      MINIO_BROWSER_REDIRECT_URL: "http://localhost:9001"
     volumes:
       - minio_data:/data
     networks:

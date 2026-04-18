@@ -1,18 +1,22 @@
 // frontend/src/components/ImageViewer.jsx
-// Versión corregida: acepta tanto src={url} como media={objeto FHIR}
-// PatientDetail lo usa como: <ImageViewer src={imgUrl} alt="..."/>
 
 import { useState } from 'react'
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch'
+
+// ✅ FIX: reemplaza host interno docker por localhost accesible desde el browser
+function fixMinioUrl(url) {
+  if (!url) return url;
+  return url.replace("http://minio:9000", "http://localhost:9000");
+}
 
 export default function ImageViewer({ src, alt, media, gradcamUrl: gradcamProp }) {
   const [showGradcam, setShowGradcam] = useState(false)
   const [brightness,  setBrightness]  = useState(100)
   const [contrast,    setContrast]    = useState(100)
 
-  // ✅ FIX: acepta src directo O extrae de media object
-  const imgUrl     = src || media?.presigned_url || media?.content?.url
-  const gradcamUrl = gradcamProp || media?.gradcam_url
+  // ✅ FIX aplicado en todas las fuentes de URL
+  const imgUrl     = fixMinioUrl(src || media?.presigned_url || media?.content?.url)
+  const gradcamUrl = fixMinioUrl(gradcamProp || media?.gradcam_url)
 
   const imgStyle = {
     filter: `brightness(${brightness}%) contrast(${contrast}%)`,
