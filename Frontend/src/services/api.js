@@ -1,9 +1,15 @@
 // frontend/src/services/api.js
 // Servicio central de API para ClinAI.
-// Todas las llamadas al backend pasan por aquí.
 
 import axios from 'axios'
 import { useAuthStore } from '../store/auth'
+
+// ✅ FIX MINIO: helper para corregir URLs internas
+const fixMinioUrl = (url) => {
+  if (!url) return url
+  return url.replace('http://minio:9000', 'http://localhost:9000')
+            .replace('https://minio:9000', 'http://localhost:9000')
+}
 
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
@@ -19,7 +25,6 @@ api.interceptors.request.use((config) => {
 api.interceptors.response.use(
   (r) => r,
   (err) => {
-    // Si 401 → logout automático
     if (err.response?.status === 401) {
       useAuthStore.getState().logout?.()
     }
@@ -45,8 +50,8 @@ export const authAPI = {
 
 // ── FHIR API ──────────────────────────────────────────────────────────────────
 export const fhirAPI = {
+
   // ── Patients ────────────────────────────────────────────────────────────────
-// DESPUÉS:
   listPatients: (params = {}) => {
     const { limit = 10, offset = 0, ...rest } = params
     return api.get('/fhir/Patient', { params: { limit, offset, ...rest } })
@@ -58,7 +63,6 @@ export const fhirAPI = {
   createPatient: (body) =>
     api.post('/fhir/Patient', body),
 
-  // ✅ Crea paciente + observaciones en una sola llamada
   createPatientFull: (body) =>
     api.post('/fhir/Patient/full', body),
 
@@ -79,15 +83,35 @@ export const fhirAPI = {
     api.post('/fhir/Observation', body),
 
   // ── Media (imágenes) ─────────────────────────────────────────────────────────
-  // ✅ FIX: presign=true para obtener URLs reales de MinIO
-  listMedia: (patientId, limit = 20) =>
-    api.get('/fhir/Media', { params: { subject: patientId, limit, presign: true } }),
 
-  // ✅ URL presignada individual por ID de imagen
-  getMediaUrl: (mediaId) =>
-    api.get(`/fhir/Media/${mediaId}/url`),
+  listMedia: async (patientId, limit = 20) => {
+    const res = await api.get('/fhir/Media', {
+      params: { subject: patientId, limit, presign: true }
+    })
 
-  // ✅ Subir imagen como multipart/form-data
+    console.log("MEDIA RESPONSE:", res.data)
+
+    if (res.data?.entry) {
+      res.data.entry = res.data.entry.map((m) => ({
+        ...m,
+        // ✅ URL FINAL que debes usar en el frontend
+        url: fixMinioUrl(m.presigned_url),
+      }))
+    }
+
+    return res
+  },
+
+  // ✅ FIX: corregir URL individual
+  getMediaUrl: async (mediaId) => {
+    const res = await api.get(`/fhir/Media/${mediaId}/url`)
+    if (res.data?.url) {
+      res.data.url = fixMinioUrl(res.data.url)
+    }
+    return res
+  },
+
+  // Subir imagen
   uploadImage: (patientId, file, modality = 'FUNDUS') => {
     const fd = new FormData()
     fd.append('patient_id', patientId)
@@ -98,11 +122,10 @@ export const fhirAPI = {
     })
   },
 
-  // ── RiskAssessment (reportes) ────────────────────────────────────────────────
+  // ── RiskAssessment ───────────────────────────────────────────────────────────
   listRiskReports: (patientId, limit = 20) =>
     api.get('/fhir/RiskAssessment', { params: { subject: patientId, limit } }),
 
-  // ✅ Obtener un reporte individual por ID
   getRiskReport: (rid) =>
     api.get(`/fhir/RiskAssessment/${rid}`),
 
@@ -112,8 +135,6 @@ export const fhirAPI = {
 
 // ── Inference API ─────────────────────────────────────────────────────────────
 export const inferAPI = {
-  // Lanza una inferencia — retorna { task_id, status: "PENDING" }
-  // DESPUÉS — agrega userId del store:
   request: (patientId, modelType) => {
     const { userId } = useAuthStore.getState()
     return api.post('/infer', {
@@ -123,19 +144,15 @@ export const inferAPI = {
     })
   },
 
-  // Polling de estado — retorna { status, task_id, ... }
   status: (taskId) =>
     api.get(`/infer/${taskId}`),
 
-  // ✅ FIX PRINCIPAL: Retorna status + result completo cuando DONE
-  // Este endpoint está corregido en main.py (usa get_db, no get_pool)
   result: (taskId) =>
     api.get(`/infer/${taskId}/result`),
 }
 
 // ── Admin API ─────────────────────────────────────────────────────────────────
 export const adminAPI = {
-  // Nombres que usa AdminPanel.jsx
   stats:       () => api.get('/admin/stats'),
   getStats:    () => api.get('/admin/stats'),
 
@@ -158,6 +175,7 @@ export const adminAPI = {
   exportAudit: (fmt) => api.get('/admin/audit-log/export', {
     params: { fmt }, responseType: 'blob'
   }),
+
   exportAuditLog: (fmt) => api.get('/admin/audit-log/export', {
     params: { fmt }, responseType: fmt === 'csv' ? 'blob' : 'json'
   }),

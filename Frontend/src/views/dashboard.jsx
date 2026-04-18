@@ -40,22 +40,29 @@ export default function Dashboard() {
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const params = { limit: LIMIT, offset: page * LIMIT }
-
-      // Filtros server-side
-      if (search.trim())            params.search        = search.trim()
-      if (filter === 'PENDIENTE')   params.pending_only  = true
-      if (filter === 'CRÍTICO')     params.risk_category = 'CRITICAL'
-      if (filter === 'SIN ANÁLISIS') params.no_analysis  = true
-
-      const { data } = await fhirAPI.listPatients(params)
+      // Trae más registros para poder filtrar bien
+      const { data } = await fhirAPI.listPatients({ limit: 50, offset: page * 10 })
       setTotal(data.total || 0)
-      setPatients(data.entry || [])
-      setCriticals(
-        (data.entry || []).filter(
-          p => p.last_risk_category === 'CRITICAL' && Number(p.pending_reports) > 0
-        ).length
-      )
+      let entries = data.entry || []
+
+      // Filtros client-side
+      if (search.trim()) {
+        const q = search.toLowerCase()
+        entries = entries.filter(p =>
+          p.name?.toLowerCase().includes(q) || p.id?.toLowerCase().includes(q)
+        )
+      }
+      if (filter === 'PENDIENTE')
+        entries = entries.filter(p => Number(p.pending_reports) > 0)
+      else if (filter === 'CRÍTICO')
+        entries = entries.filter(p => p.last_risk_category === 'CRITICAL')
+      else if (filter === 'SIN ANÁLISIS')
+        entries = entries.filter(p => !p.last_risk_category)
+
+      setPatients(entries.slice(0, 10))  // muestra 10
+      setCriticals(entries.filter(p =>
+        p.last_risk_category === 'CRITICAL' && Number(p.pending_reports) > 0
+      ).length)
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
   }, [page, search, filter])

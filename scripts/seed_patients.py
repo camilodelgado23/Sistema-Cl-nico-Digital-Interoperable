@@ -7,16 +7,10 @@ Requisitos:
 
 Uso (con el sistema levantado):
   python scripts/seed_patients.py
-
-Variables de entorno (o editar constantes abajo):
-  API_URL     → http://localhost:8000 (o URL de Render)
-  ACCESS_KEY  → X-Access-Key del usuario MEDICO
-  PERM_KEY    → X-Permission-Key del usuario MEDICO
 """
 import os, pathlib, time
 import pandas as pd
 from faker import Faker
-from minio import Minio
 import requests
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -24,19 +18,13 @@ API_URL    = os.getenv("API_URL",    "http://localhost:8000")
 ACCESS_KEY = os.getenv("ACCESS_KEY", "d13e4618e587c3d42ece96cadcc30b37")
 PERM_KEY   = os.getenv("PERM_KEY",   "d7146f286875d1e9c3018e18cff4750d")
 
-MINIO_ENDPOINT   = os.getenv("MINIO_ENDPOINT",   "localhost:9000")
-MINIO_ACCESS_KEY = os.getenv("MINIO_ACCESS_KEY",  "minioadmin")
-MINIO_SECRET_KEY = os.getenv("MINIO_SECRET_KEY",  "minioadmin")
-MINIO_BUCKET     = "clinical-images"
-
 DIABETES_CSV = pathlib.Path("datasets/diabetes.csv")
 APTOS_DIR    = pathlib.Path("datasets/aptos/train_images")
-APTOS_CSV    = pathlib.Path("datasets/aptos/train.csv")
 
 MIN_PATIENTS  = 30
 MIN_WITH_IMG  = 15
 
-# ── LOINC mapping — must match ml-service/training/train_and_export.py ────────
+# ── LOINC mapping ─────────────────────────────────────────────────────────────
 LOINC = {
     "Glucose":                  "2339-0",
     "BloodPressure":            "55284-4",
@@ -96,40 +84,35 @@ def create_observation(token: str, patient_id: str,
     r.raise_for_status()
 
 
-def upload_image_to_minio(mc: Minio, patient_id: str,
-                          img_path: pathlib.Path) -> str:
-    key = f"patients/{patient_id}/retina.png"
-    mc.fput_object(MINIO_BUCKET, key, str(img_path),
-                   content_type="image/png")
-    return key
-
-
-def create_media(token: str, patient_id: str, minio_key: str):
-    r = requests.post(
-        f"{API_URL}/fhir/Media",
-        headers={"Authorization": f"Bearer {token}",
-                 "Content-Type": "application/json"},
-        json={"patient_id": patient_id, "minio_key": minio_key,
-              "modality": "FUNDUS"},
-    )
+def upload_image(token: str, patient_id: str, img_path: pathlib.Path):
+    """
+    ✅ Sube la imagen a través del backend (/fhir/Media/upload).
+    El backend se encarga de subir a MinIO y encriptar la key,
+    garantizando que la presigned URL use el host correcto (MINIO_PUBLIC_ENDPOINT).
+    """
+    with open(img_path, "rb") as f:
+        r = requests.post(
+            f"{API_URL}/fhir/Media/upload",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"patient_id": patient_id, "modality": "FUNDUS"},
+            files={"file": (img_path.name, f, "image/png")},
+        )
     r.raise_for_status()
+    return r.json()
 
 
 def main():
-    # Validate dataset files
     if not DIABETES_CSV.exists():
         raise FileNotFoundError(
             f"Missing {DIABETES_CSV}\n"
             "Download: https://www.kaggle.com/datasets/uciml/pima-indians-diabetes-database"
         )
 
-    df     = pd.read_csv(DIABETES_CSV)
-    # Replace zeros with median (same imputation as training)
+    df = pd.read_csv(DIABETES_CSV)
     for col in ["Glucose", "BloodPressure", "SkinThickness", "Insulin", "BMI"]:
         df[col] = df[col].replace(0, df[col].median())
-    df = df.head(max(MIN_PATIENTS, 50))   # use first 50 rows
+    df = df.head(max(MIN_PATIENTS, 50))
 
-    # APTOS images (optional — only if available)
     aptos_imgs = []
     if APTOS_DIR.exists():
         aptos_imgs = sorted(APTOS_DIR.glob("*.png"))[:MIN_WITH_IMG + 5]
@@ -137,50 +120,41 @@ def main():
     else:
         print(f"⚠️  APTOS images not found at {APTOS_DIR} — patients will have no images")
 
-    # MinIO client
-    mc = Minio(MINIO_ENDPOINT, access_key=MINIO_ACCESS_KEY,
-               secret_key=MINIO_SECRET_KEY, secure=False)
-    if not mc.bucket_exists(MINIO_BUCKET):
-        mc.make_bucket(MINIO_BUCKET)
-
-    # Login
     print("🔐 Logging in...")
     token = login()
     print("✅ Authenticated")
 
-    created = 0
+    created  = 0
     with_img = 0
     errors   = 0
 
     for i, row in df.iterrows():
         try:
-            # Generate synthetic demographics (Colombian locale)
             name       = faker.name()
             birth_date = str(faker.date_of_birth(minimum_age=20, maximum_age=70))
             id_doc     = faker.numerify("##########")
             gt         = int(row["Outcome"])
 
-            # 1. Create FHIR Patient
+            # 1. Crear paciente FHIR
             pid = create_patient(token, name, birth_date, id_doc, gt)
 
-            # 2. Create Observations (one per feature, LOINC coded)
+            # 2. Crear observaciones LOINC
             for col, loinc_code in LOINC.items():
                 if col in row and pd.notna(row[col]):
                     create_observation(token, pid, loinc_code,
                                        float(row[col]), UNIT_MAP[col])
 
-            # 3. Upload retina image to MinIO + create Media FHIR
+            # 3. ✅ Subir imagen VÍA BACKEND (no directo a MinIO)
             if with_img < len(aptos_imgs):
                 img_path = aptos_imgs[with_img]
-                minio_key = upload_image_to_minio(mc, pid, img_path)
-                create_media(token, pid, minio_key)
+                upload_image(token, pid, img_path)
                 with_img += 1
 
             created += 1
             print(f"  [{created:3d}] ✅ {name} (GT={gt})"
-                  f"{' + retina' if with_img > created - 1 else ''}")
+                  f"{' + retina' if with_img >= created else ''}")
 
-            time.sleep(0.05)   # avoid hammering the API
+            time.sleep(0.05)
 
         except Exception as e:
             errors += 1
