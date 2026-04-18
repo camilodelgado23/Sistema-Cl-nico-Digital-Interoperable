@@ -14,10 +14,26 @@ const calcAge = (bd) => {
 }
 
 const LOINC_NAMES = {
+  // Códigos LOINC
   '2339-0':  'Glucosa',   '55284-4': 'Presión Arterial',
   '39156-5': 'BMI',       '14749-6': 'Insulina',
   '21612-7': 'Edad',      '11996-6': 'Embarazos',
   '39106-0': 'Grosor Piel','33914-3': 'Pedigree Diabetes',
+  // Nombres en inglés — ML service devuelve estas claves directamente
+  'Glucose':                  'Glucosa',
+  'BloodPressure':            'Presión Arterial',
+  'BMI':                      'BMI',
+  'Insulin':                  'Insulina',
+  'Age':                      'Edad',
+  'Pregnancies':              'Embarazos',
+  'SkinThickness':            'Grosor Piel',
+  'DiabetesPedigreeFunction': 'Pedigree Diabetes',
+}
+
+const FEATURE_INDEX_NAMES = {
+  0: 'Embarazos', 1: 'Glucosa', 2: 'Presión Arterial',
+  3: 'Grosor Piel', 4: 'Insulina', 5: 'BMI',
+  6: 'Pedigree Diabetes', 7: 'Edad',
 }
 
 const OUTLIER_RULES = {
@@ -360,6 +376,7 @@ function TabAnalisis({ patientId, onCritical }) {
             stopPolling()
             setRunning(false)
             if (d.result) {
+              console.log('🔍 RESULT:', JSON.stringify(d.result))
               setResult(d.result)
               if (d.result.is_critical) onCritical(d.result)
             }
@@ -387,10 +404,14 @@ function TabAnalisis({ patientId, onCritical }) {
 
   const shapData = result?.shap_values
     ? Object.entries(result.shap_values)
-        .map(([k,v])=>({ name: LOINC_NAMES[k]||k, value: Math.abs(Number(v)), raw: Number(v) }))
-        .sort((a,b)=>b.value-a.value).slice(0,8)
+        .map(([k, v]) => {
+          const name = LOINC_NAMES[k] || FEATURE_INDEX_NAMES[Number(k)] || k
+          return { name, value: Math.abs(Number(v)), raw: Number(v) }
+        })
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 8)
     : []
-
+    
   return (
     <div className="tab-content" style={{display:'flex',flexDirection:'column',gap:'1.25rem'}}>
       <div className="card">

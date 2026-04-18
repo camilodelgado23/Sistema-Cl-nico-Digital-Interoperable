@@ -134,6 +134,8 @@ export const fhirAPI = {
 }
 
 // ── Inference API ─────────────────────────────────────────────────────────────
+const ORCHESTRATOR_URL = import.meta.env.VITE_ORCHESTRATOR_URL || 'http://localhost:8003'
+
 export const inferAPI = {
   request: (patientId, modelType) => {
     const { userId } = useAuthStore.getState()
@@ -147,8 +149,9 @@ export const inferAPI = {
   status: (taskId) =>
     api.get(`/infer/${taskId}`),
 
+  // ✅ Directo al orchestrator — incluye gradcam_url y shap_values completos
   result: (taskId) =>
-    api.get(`/infer/${taskId}/result`),
+    axios.get(`${ORCHESTRATOR_URL}/infer/${taskId}`),
 }
 
 // ── Admin API ─────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 orchestrator/main.py
 Cola de inferencias asíncrona con Semaphore(4).
 - POST /infer          → task_id inmediato (no bloquea)
-- GET  /infer/{id}     → PENDING | RUNNING | DONE | ERROR
+- GET  /infer/{id}     → PENDING | RUNNING | DONE | ERROR + resultado completo
 - WS   /ws/infer/{id}  → push en tiempo real al frontend
 """
 import asyncio, os, uuid, json
@@ -44,8 +44,6 @@ class WSManager:
 
     def disconnect(self, task_id: str, ws: WebSocket):
         if task_id in self._connections:
-            self._connections[task_id].discard(ws) if hasattr(
-                self._connections[task_id], 'discard') else None
             try:
                 self._connections[task_id].remove(ws)
             except ValueError:
@@ -111,10 +109,13 @@ async def save_risk_report(patient_id: str, model_type: str,
     risk_score    = result.get("risk_score", 0.0)
     risk_category = result.get("risk_category", "LOW")
     is_critical   = result.get("is_critical", False)
-    shap_json     = result.get("shap_values") or result.get("gradcam_url")
+
+    # ✅ SHAP y Grad-CAM en campos separados — ya no se mezclan
+    shap_values  = result.get("shap_values")
+    gradcam_url  = result.get("gradcam_url")
+    original_url = result.get("original_url")
 
     async with pool.acquire() as conn:
-        # Encrypt prediction using pgcrypto
         aes_key = os.getenv("AES_KEY", "changeme_32_char_key_here______")
         enc_row = await conn.fetchrow(
             "SELECT pgp_sym_encrypt($1, $2) AS enc",
@@ -123,15 +124,17 @@ async def save_risk_report(patient_id: str, model_type: str,
         row = await conn.fetchrow(
             """INSERT INTO risk_reports
                (patient_id, model_type, risk_score, risk_category,
-                is_critical, prediction_enc, shap_json, signed_by)
-               VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, NULL)
+                is_critical, prediction_enc, shap_json,
+                gradcam_url, original_url, signed_by)
+               VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, NULL)
                RETURNING id""",
             patient_id, model_type, risk_score, risk_category,
             is_critical,
             enc_row["enc"],
-            json.dumps(shap_json) if shap_json else None,
+            json.dumps(shap_values) if shap_values is not None else None,
+            gradcam_url,   # ✅ columna propia
+            original_url,  # ✅ columna propia
         )
-        # Audit log
         await conn.execute(
             """INSERT INTO audit_log (user_id, role, action, resource_type,
                                       resource_id, result)
@@ -152,13 +155,13 @@ async def run_inference(task_id: str, patient_id: str,
                 async with httpx.AsyncClient(timeout=TASK_TIMEOUT) as client:
                     r = await client.post(
                         f"{ML_URL}/ml/predict",
-                        json={"patient_id": patient_id},   # ✅ ML usa JSON
+                        json={"patient_id": patient_id},
                     )
-            else:  # ✅ FIX 3 — DL usa query params
+            else:  # DL — usa query params
                 async with httpx.AsyncClient(timeout=TASK_TIMEOUT) as client:
                     r = await client.post(
                         f"{DL_URL}/dl/predict",
-                        params={"patient_id": patient_id},  # 🔥 cambio clave
+                        params={"patient_id": patient_id},
                     )
 
             r.raise_for_status()
@@ -167,13 +170,12 @@ async def run_inference(task_id: str, patient_id: str,
             rid = await save_risk_report(patient_id, model_type, requested_by, result)
             await set_status(task_id, "DONE", result_id=rid)
 
-            # If critical → push alert via WS
             if result.get("is_critical"):
                 await ws_manager.broadcast(task_id, {
-                    "task_id": task_id,
-                    "type": "CRITICAL_ALERT",
-                    "patient_id": patient_id,
-                    "risk_score": result.get("risk_score"),
+                    "task_id":       task_id,
+                    "type":          "CRITICAL_ALERT",
+                    "patient_id":    patient_id,
+                    "risk_score":    result.get("risk_score"),
                     "risk_category": result.get("risk_category"),
                 })
 
@@ -182,30 +184,35 @@ async def run_inference(task_id: str, patient_id: str,
         except Exception as e:
             await set_status(task_id, "ERROR", error_msg=str(e))
 
-# ── Multimodal (bono) ─────────────────────────────────────────────────────────
+
+# ── Multimodal (fusión tardía ML + DL) ───────────────────────────────────────
 async def run_multimodal(task_id: str, patient_id: str, requested_by: str):
     async with sem:
         await set_status(task_id, "RUNNING")
         try:
             async with httpx.AsyncClient(timeout=TASK_TIMEOUT) as client:
                 ml_task, dl_task = await asyncio.gather(
-                    client.post(f"{ML_URL}/ml/predict", json={"patient_id": patient_id}),
-                    client.post(f"{DL_URL}/dl/predict", json={"patient_id": patient_id}),
+                    client.post(f"{ML_URL}/ml/predict",
+                                json={"patient_id": patient_id}),
+                    # ✅ DL usa query params, no JSON body
+                    client.post(f"{DL_URL}/dl/predict",
+                                params={"patient_id": patient_id}),
                 )
             ml_result = ml_task.json()
             dl_result = dl_task.json()
 
-            # Late fusion — average probabilities
+            # Late fusion — promedio ponderado
             combined_score = (
                 ml_result.get("risk_score", 0) * 0.5 +
                 dl_result.get("risk_score", 0) * 0.5
             )
             fused = {
-                "risk_score": round(combined_score, 4),
+                "risk_score":    round(combined_score, 4),
                 "risk_category": _score_to_category(combined_score),
-                "is_critical": combined_score >= 0.85,
-                "shap_values": ml_result.get("shap_values"),
-                "gradcam_url": dl_result.get("gradcam_url"),
+                "is_critical":   combined_score >= 0.85,
+                "shap_values":   ml_result.get("shap_values"),   # ✅ SHAP del ML
+                "gradcam_url":   dl_result.get("gradcam_url"),   # ✅ Grad-CAM del DL
+                "original_url":  dl_result.get("original_url"),  # ✅ imagen original
             }
             rid = await save_risk_report(patient_id, "MULTIMODAL", requested_by, fused)
             await set_status(task_id, "DONE", result_id=rid)
@@ -244,16 +251,48 @@ async def request_inference(body: InferRequest, bg: BackgroundTasks):
 
 @app.get("/infer/{task_id}")
 async def get_task_status(task_id: str):
+    """
+    Retorna el estado de la tarea. Cuando status=DONE incluye el resultado
+    completo (risk_score, shap_values, gradcam_url, original_url, etc.)
+    para que el frontend no necesite hacer un segundo request.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """SELECT id, patient_id, model_type, status,
-                      created_at, completed_at, result_id, error_msg
-               FROM inference_queue WHERE id = $1::uuid""",
+            """SELECT
+                 iq.id, iq.patient_id, iq.model_type, iq.status,
+                 iq.created_at, iq.completed_at, iq.result_id, iq.error_msg,
+                 rr.risk_score, rr.risk_category, rr.is_critical,
+                 rr.shap_json, rr.gradcam_url, rr.original_url
+               FROM inference_queue iq
+               LEFT JOIN risk_reports rr ON rr.id = iq.result_id
+               WHERE iq.id = $1::uuid""",
             task_id,
         )
     if not row:
         raise HTTPException(404, "Tarea no encontrada")
+
+    # Construir resultado cuando la tarea está completa
+    result = None
+    if row["status"] == "DONE" and row["result_id"]:
+        shap_values = None
+        if row["shap_json"]:
+            try:
+                shap_values = json.loads(row["shap_json"])
+            except Exception:
+                shap_values = row["shap_json"]
+
+        result = {
+            "id":            str(row["result_id"]),
+            "risk_score":    float(row["risk_score"]) if row["risk_score"] is not None else None,
+            "risk_category": row["risk_category"],
+            "is_critical":   row["is_critical"],
+            "shap_values":   shap_values,
+            "gradcam_url":   row["gradcam_url"],
+            "original_url":  row["original_url"],
+            "model_type":    row["model_type"],
+        }
+
     return {
         "task_id":      str(row["id"]),
         "patient_id":   str(row["patient_id"]) if row["patient_id"] else None,
@@ -263,6 +302,7 @@ async def get_task_status(task_id: str):
         "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
         "result_id":    str(row["result_id"]) if row["result_id"] else None,
         "error_msg":    row["error_msg"],
+        "result":       result,   # ✅ resultado completo incluido — el frontend ya no necesita 2do request
     }
 
 
@@ -275,7 +315,6 @@ async def ws_inference_status(websocket: WebSocket, task_id: str):
     """
     await ws_manager.connect(task_id, websocket)
     try:
-        # Send current status immediately on connect
         pool = await get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -284,12 +323,11 @@ async def ws_inference_status(websocket: WebSocket, task_id: str):
             )
         if row:
             await websocket.send_json({
-                "task_id": task_id,
-                "status": row["status"],
+                "task_id":   task_id,
+                "status":    row["status"],
                 "result_id": str(row["result_id"]) if row["result_id"] else None,
                 "error_msg": row["error_msg"],
             })
-        # Keep alive — wait for disconnect
         while True:
             await asyncio.sleep(30)
             await websocket.send_json({"type": "ping"})
@@ -299,5 +337,9 @@ async def ws_inference_status(websocket: WebSocket, task_id: str):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "orchestrator",
-            "max_workers": MAX_WORKERS, "semaphore_value": sem._value}
+    return {
+        "status":         "ok",
+        "service":        "orchestrator",
+        "max_workers":    MAX_WORKERS,
+        "semaphore_value": sem._value,
+    }
