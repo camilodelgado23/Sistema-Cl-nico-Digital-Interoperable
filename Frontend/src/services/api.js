@@ -160,14 +160,16 @@ export const adminAPI = {
   getStats:    () => api.get('/admin/stats'),
 
   listUsers: (params) => {
-    const limit  = params?.limit  ?? 20
-    const offset = params?.offset ?? 0
-    return api.get('/admin/users', { params: { limit, offset } })
+    const limit          = params?.limit          ?? 20
+    const offset         = params?.offset         ?? 0
+    const include_deleted = params?.include_deleted ?? false
+    return api.get('/admin/users', { params: { limit, offset, include_deleted } })
   },
 
   createUser:  (body)    => api.post('/admin/users', body),
   updateUser:  (uid, b)  => api.patch(`/admin/users/${uid}`, b),
   deleteUser:  (uid)     => api.delete(`/admin/users/${uid}`),
+  restoreUser: (uid)     => api.patch(`/admin/users/${uid}/restore`),
 
   regenKeys:       (uid) => api.post(`/admin/users/${uid}/regenerate-keys`),
   regenerateKeys:  (uid) => api.post(`/admin/users/${uid}/regenerate-keys`),
@@ -182,6 +184,15 @@ export const adminAPI = {
   exportAuditLog: (fmt) => api.get('/admin/audit-log/export', {
     params: { fmt }, responseType: fmt === 'csv' ? 'blob' : 'json'
   }),
+}
+
+// ── Assignment API ────────────────────────────────────────────────────────────
+export const assignmentAPI = {
+  list:          (params)      => api.get('/admin/assignments', { params }),
+  create:        (body)        => api.post('/admin/assignments', body),
+  remove:        (aid)         => api.delete(`/admin/assignments/${aid}`),
+  listDoctors:   ()            => api.get('/admin/assignments/doctors'),
+  listPatients:  ()            => api.get('/admin/assignments/patients'),
 }
 
 export default api

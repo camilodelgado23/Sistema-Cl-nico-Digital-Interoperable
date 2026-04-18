@@ -34,16 +34,18 @@ class UserUpdate(BaseModel):
 async def list_users(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    include_deleted: bool = Query(False),
     user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db),
 ):
+    where = "" if include_deleted else "WHERE deleted_at IS NULL"
     rows = await db.fetch(
-        """SELECT id, username, role, is_active, created_at
-           FROM users WHERE deleted_at IS NULL
-           ORDER BY created_at DESC LIMIT $1 OFFSET $2""",
+        f"""SELECT id, username, role, is_active, created_at, deleted_at
+            FROM users {where}
+            ORDER BY created_at DESC LIMIT $1 OFFSET $2""",
         limit, offset,
     )
-    total = await db.fetchval("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
+    total = await db.fetchval(f"SELECT COUNT(*) FROM users {where}")
     return {"total": total, "limit": limit, "offset": offset,
             "entry": [dict(r) for r in rows]}
 
@@ -109,6 +111,28 @@ async def deactivate_user(
     )
     await log_audit(db, str(user["id"]), user["role"], "DELETE_USER", "User",
                     uid, request.client.host if request.client else None)
+
+
+@router.patch("/users/{uid}/restore")
+async def restore_user(
+    uid: str,
+    request: Request,
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    row = await db.fetchrow(
+        "SELECT id, deleted_at FROM users WHERE id = $1::uuid", uid
+    )
+    if not row:
+        raise HTTPException(404, "Usuario no encontrado")
+    if row["deleted_at"] is None:
+        raise HTTPException(400, "El usuario no está eliminado")
+    await db.execute(
+        "UPDATE users SET deleted_at = NULL, is_active = TRUE WHERE id = $1::uuid", uid
+    )
+    await log_audit(db, str(user["id"]), user["role"], "RESTORE_USER", "User",
+                    uid, request.client.host if request.client else None)
+    return {"restored": uid}
 
 
 @router.post("/users/{uid}/regenerate-keys")
@@ -231,7 +255,150 @@ async def get_stats(
     }
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# PATIENT ASSIGNMENTS
+# ──────────────────────────────────────────────────────────────────────────────
+class AssignmentCreate(BaseModel):
+    patient_id: str
+    doctor_id: str
+
+
+@router.get("/assignments")
+async def list_assignments(
+    doctor_id: Optional[str] = None,
+    patient_id: Optional[str] = None,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    filters, params = [], []
+    if doctor_id:
+        params.append(doctor_id)
+        filters.append(f"pa.doctor_id = ${len(params)}::uuid")
+    if patient_id:
+        params.append(patient_id)
+        filters.append(f"pa.patient_id = ${len(params)}::uuid")
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params += [limit, offset]
+    rows = await db.fetch(
+        f"""SELECT pa.id, pa.assigned_at,
+                   p.id AS patient_id, p.name AS patient_name,
+                   d.id AS doctor_id, d.username AS doctor_username,
+                   ab.username AS assigned_by_username
+            FROM patient_assignments pa
+            JOIN patients p ON p.id = pa.patient_id
+            JOIN users d ON d.id = pa.doctor_id
+            LEFT JOIN users ab ON ab.id = pa.assigned_by
+            {where}
+            ORDER BY pa.assigned_at DESC
+            LIMIT ${len(params)-1} OFFSET ${len(params)}""",
+        *params,
+    )
+    total = await db.fetchval(
+        f"SELECT COUNT(*) FROM patient_assignments pa {where}", *params[:-2]
+    )
+    return {
+        "total": total, "limit": limit, "offset": offset,
+        "entry": [_assignment_row(r) for r in rows],
+    }
+
+
+@router.post("/assignments", status_code=201)
+async def create_assignment(
+    body: AssignmentCreate,
+    request: Request,
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    # Validar que el doctor existe y tiene rol MEDICO
+    doctor = await db.fetchrow(
+        "SELECT id, role FROM users WHERE id = $1::uuid AND deleted_at IS NULL", body.doctor_id
+    )
+    if not doctor or doctor["role"] != "MEDICO":
+        raise HTTPException(400, "El usuario seleccionado no es un médico activo")
+
+    # Validar que el paciente existe
+    patient = await db.fetchrow(
+        "SELECT id FROM patients WHERE id = $1::uuid AND deleted_at IS NULL", body.patient_id
+    )
+    if not patient:
+        raise HTTPException(404, "Paciente no encontrado")
+
+    try:
+        row = await db.fetchrow(
+            """INSERT INTO patient_assignments (patient_id, doctor_id, assigned_by)
+               VALUES ($1::uuid, $2::uuid, $3::uuid)
+               RETURNING id, patient_id, doctor_id, assigned_at""",
+            body.patient_id, body.doctor_id, str(user["id"]),
+        )
+    except Exception:
+        raise HTTPException(409, "Este paciente ya está asignado a ese médico")
+
+    await log_audit(db, str(user["id"]), user["role"], "ASSIGN_PATIENT", "PatientAssignment",
+                    str(row["id"]), request.client.host if request.client else None,
+                    detail={"patient_id": body.patient_id, "doctor_id": body.doctor_id})
+    return {
+        "id": str(row["id"]),
+        "patient_id": str(row["patient_id"]),
+        "doctor_id": str(row["doctor_id"]),
+        "assigned_at": row["assigned_at"].isoformat(),
+    }
+
+
+@router.delete("/assignments/{aid}", status_code=204)
+async def delete_assignment(
+    aid: str,
+    request: Request,
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    result = await db.execute(
+        "DELETE FROM patient_assignments WHERE id = $1::uuid", aid
+    )
+    if result == "DELETE 0":
+        raise HTTPException(404, "Asignación no encontrada")
+    await log_audit(db, str(user["id"]), user["role"], "REMOVE_ASSIGNMENT", "PatientAssignment",
+                    None, request.client.host if request.client else None)
+
+
+@router.get("/assignments/doctors")
+async def list_doctors(
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """Lista médicos activos para los dropdowns del panel de asignaciones."""
+    rows = await db.fetch(
+        "SELECT id, username FROM users WHERE role = 'MEDICO' AND deleted_at IS NULL AND is_active = TRUE ORDER BY username"
+    )
+    return [{"id": str(r["id"]), "username": r["username"]} for r in rows]
+
+
+@router.get("/assignments/patients")
+async def list_all_patients(
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """Lista todos los pacientes activos para los dropdowns del panel de asignaciones."""
+    rows = await db.fetch(
+        "SELECT id, name FROM patients WHERE deleted_at IS NULL ORDER BY name"
+    )
+    return [{"id": str(r["id"]), "name": r["name"]} for r in rows]
+
+
 # ── helpers ───────────────────────────────────────────────────────────────────
+def _assignment_row(row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "patient_id": str(row["patient_id"]),
+        "patient_name": row["patient_name"],
+        "doctor_id": str(row["doctor_id"]),
+        "doctor_username": row["doctor_username"],
+        "assigned_by": row["assigned_by_username"],
+        "assigned_at": row["assigned_at"].isoformat(),
+    }
+
+
 def _audit_row(row) -> dict:
     return {
         "id": row["id"],

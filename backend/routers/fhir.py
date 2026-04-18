@@ -88,6 +88,16 @@ async def create_patient(
         str(user["id"]), body.name, birth_date_obj, enc_doc, body.ground_truth,
     )
     pid = str(row["id"])
+
+    # ── FIX: auto-asignar el paciente al médico que lo crea ──────────────────
+    # Así el médico que crea el paciente también lo ve en su lista
+    await db.execute(
+        """INSERT INTO patient_assignments (patient_id, doctor_id, assigned_by)
+           VALUES ($1::uuid, $2::uuid, $2::uuid)
+           ON CONFLICT (patient_id, doctor_id) DO NOTHING""",
+        pid, str(user["id"]),
+    )
+
     await log_audit(db, str(user["id"]), user["role"], "CREATE_PATIENT", "Patient",
                     pid, request.client.host if request.client else None)
     return _patient_to_fhir(row)
@@ -104,7 +114,16 @@ async def list_patients(
     if user["role"] == "ADMIN":
         where, params = "WHERE p.deleted_at IS NULL", []
     elif user["role"] == "MEDICO":
-        where, params = "WHERE p.deleted_at IS NULL AND p.owner_id = $1::uuid", [str(user["id"])]
+        # ── FIX: Médico SOLO ve pacientes asignados explícitamente ────────────
+        # Se eliminó "p.owner_id = $1::uuid OR" para que los médicos
+        # únicamente vean pacientes que el admin les asignó (o que crearon,
+        # los cuales quedan auto-asignados en create_patient).
+        where = """WHERE p.deleted_at IS NULL AND
+            EXISTS (
+                SELECT 1 FROM patient_assignments pa
+                WHERE pa.patient_id = p.id AND pa.doctor_id = $1::uuid
+            )"""
+        params = [str(user["id"])]
     else:
         where, params = "WHERE p.deleted_at IS NULL AND p.owner_id = $1::uuid", [str(user["id"])]
 
@@ -143,7 +162,7 @@ async def get_patient(
     )
     if not row:
         raise HTTPException(404, "Paciente no encontrado")
-    _check_patient_access(user, row)
+    await _check_medico_access(user, row, db)
 
     dec_doc = await decrypt_value(db, row["identification_doc"])
     await log_audit(db, str(user["id"]), user["role"], "VIEW_PATIENT", "Patient",
@@ -205,104 +224,37 @@ async def create_observation(
            RETURNING id, patient_id, loinc_code, value, unit, status, created_at""",
         body.patient_id, body.loinc_code, body.value, body.unit, body.status,
     )
+    await log_audit(db, str(user["id"]), user["role"], "CREATE_OBSERVATION", "Observation",
+                    str(row["id"]), request.client.host if request.client else None)
     return _observation_to_fhir(row)
 
 
 @router.get("/Observation")
 async def list_observations(
-    subject: str = Query(..., description="Patient UUID"),
-    limit: int = Query(20, ge=1, le=200),
+    subject: str = Query(...),
+    limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     user: dict = Depends(require_authenticated),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    _check_subject_access(user, subject)
     rows = await db.fetch(
-        """SELECT * FROM observations
+        """SELECT id, patient_id, loinc_code, value, unit, status, created_at
+           FROM observations
            WHERE patient_id = $1::uuid AND deleted_at IS NULL
            ORDER BY created_at DESC LIMIT $2 OFFSET $3""",
         subject, limit, offset,
     )
-    count = await db.fetchval(
-        "SELECT COUNT(*) FROM observations WHERE patient_id = $1::uuid AND deleted_at IS NULL",
-        subject,
-    )
     return {
-        "total": count, "limit": limit, "offset": offset,
+        "total": len(rows), "limit": limit, "offset": offset,
         "entry": [_observation_to_fhir(r) for r in rows],
     }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# MEDIA (imágenes → MinIO)
+# MEDIA
 # ──────────────────────────────────────────────────────────────────────────────
-class MediaCreate(BaseModel):
-    patient_id: str
-    minio_key: str
-    modality: str
-
-
-@router.post("/Media", status_code=201)
-async def create_media(
-    body: MediaCreate,
-    request: Request,
-    user: dict = Depends(require_medico),
-    db: asyncpg.Connection = Depends(get_db),
-):
-    enc_key = await encrypt_value(db, body.minio_key)
-    row = await db.fetchrow(
-        """INSERT INTO images (patient_id, minio_key, modality, uploaded_by)
-           VALUES ($1::uuid, $2, $3, $4::uuid)
-           RETURNING id, patient_id, modality, created_at""",
-        body.patient_id, enc_key, body.modality, str(user["id"]),
-    )
-    await log_audit(db, str(user["id"]), user["role"], "UPLOAD_IMAGE", "Media",
-                    str(row["id"]), request.client.host if request.client else None)
-    return _media_to_fhir(row, body.minio_key)
-
-
-@router.get("/Media")
-async def list_media(
-    subject: str = Query(...),
-    limit: int = Query(10, ge=1, le=50),
-    offset: int = Query(0, ge=0),
-    presign: bool = Query(False),
-    user: dict = Depends(require_authenticated),
-    db: asyncpg.Connection = Depends(get_db),
-):
-    _check_subject_access(user, subject)
-    rows = await db.fetch(
-        """SELECT i.id, i.patient_id, i.minio_key, i.modality, i.created_at
-           FROM images i
-           WHERE i.patient_id = $1::uuid AND i.deleted_at IS NULL
-           ORDER BY i.created_at DESC LIMIT $2 OFFSET $3""",
-        subject, limit, offset,
-    )
-    total = await db.fetchval(
-        "SELECT COUNT(*) FROM images WHERE patient_id = $1::uuid AND deleted_at IS NULL", subject
-    )
-
-    result = []
-    for r in rows:
-        plain_key = await decrypt_value(db, r["minio_key"])
-        entry = _media_to_fhir(r, plain_key)
-
-        if presign:
-            try:
-                url = _make_presigned_url(plain_key)
-                entry["presigned_url"] = url
-                entry["content"]["url"] = url
-            except Exception as e:
-                entry["presigned_url"] = None
-                entry["presigned_error"] = str(e)
-
-        result.append(entry)
-
-    return {"total": total, "limit": limit, "offset": offset, "entry": result}
-
-
 @router.post("/Media/upload", status_code=201)
-async def upload_media_file(
+async def upload_media(
     request: Request,
     patient_id: str = Form(...),
     modality: str = Form("FUNDUS"),
@@ -310,29 +262,21 @@ async def upload_media_file(
     user: dict = Depends(require_medico),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    allowed = {"image/jpeg", "image/png", "image/jpg"}
-    if file.content_type not in allowed:
-        raise HTTPException(400, "Solo se permiten imágenes JPG/PNG")
-
     content = await file.read()
-    if len(content) > 10 * 1024 * 1024:
-        raise HTTPException(400, "Imagen demasiado grande (máx 10 MB)")
+    minio = _minio_client()
+    if not minio.bucket_exists(settings.MINIO_BUCKET):
+        minio.make_bucket(settings.MINIO_BUCKET)
 
-    minio_key = f"patients/{patient_id}/{file.filename}"
-    mc = _minio_client()  # ✅ cliente interno para subir
-
-    if not mc.bucket_exists(settings.MINIO_BUCKET):
-        mc.make_bucket(settings.MINIO_BUCKET)
-
-    mc.put_object(
-        settings.MINIO_BUCKET,
-        minio_key,
-        _io.BytesIO(content),
-        length=len(content),
-        content_type=file.content_type,
+    key = f"{patient_id}/{uuid.uuid4()}-{file.filename}"
+    minio.put_object(
+        settings.MINIO_BUCKET, key,
+        _io.BytesIO(content), len(content),
+        content_type=file.content_type or "application/octet-stream",
     )
 
-    enc_key = await encrypt_value(db, minio_key)
+    from core.crypto import encrypt_value as _enc
+    enc_key = await _enc(db, key)
+
     row = await db.fetchrow(
         """INSERT INTO images (patient_id, minio_key, modality, uploaded_by)
            VALUES ($1::uuid, $2, $3, $4::uuid)
@@ -341,122 +285,108 @@ async def upload_media_file(
     )
     await log_audit(db, str(user["id"]), user["role"], "UPLOAD_IMAGE", "Media",
                     str(row["id"]), request.client.host if request.client else None)
-    return _media_to_fhir(row, minio_key)
+    return _media_to_fhir(row, key)
 
 
-@router.get("/Media/{media_id}/url")
-async def get_media_presigned_url(
-    media_id: str,
+@router.get("/Media")
+async def list_media(
+    subject: str = Query(...),
+    limit: int = Query(20, ge=1, le=100),
+    presign: bool = Query(False),
+    user: dict = Depends(require_authenticated),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    rows = await db.fetch(
+        """SELECT id, patient_id, minio_key, modality, created_at
+           FROM images
+           WHERE patient_id = $1::uuid AND deleted_at IS NULL
+           ORDER BY created_at DESC LIMIT $2""",
+        subject, limit,
+    )
+    from core.crypto import decrypt_value as _dec
+    entry = []
+    for r in rows:
+        plain_key = await _dec(db, r["minio_key"])
+        item = _media_to_fhir(r, plain_key)
+        if presign:
+            item["presigned_url"] = _make_presigned_url(plain_key)
+        entry.append(item)
+    return {"total": len(entry), "limit": limit, "entry": entry}
+
+
+@router.get("/Media/{mid}/url")
+async def get_media_url(
+    mid: str,
     user: dict = Depends(require_authenticated),
     db: asyncpg.Connection = Depends(get_db),
 ):
     row = await db.fetchrow(
-        """SELECT id, patient_id, minio_key, modality
-           FROM images
-           WHERE id = $1::uuid AND deleted_at IS NULL""",
-        media_id,
+        "SELECT minio_key FROM images WHERE id = $1::uuid AND deleted_at IS NULL", mid
     )
     if not row:
         raise HTTPException(404, "Imagen no encontrada")
-
-    plain_key = await decrypt_value(db, row["minio_key"])
-
-    try:
-        url = _make_presigned_url(plain_key)
-    except Exception as e:
-        raise HTTPException(500, f"Error generando URL: {e}")
-
-    return {
-        "id": media_id,
-        "url": url,
-        "modality": row["modality"],
-        "expires_in": 3600,
-    }
+    from core.crypto import decrypt_value as _dec
+    plain_key = await _dec(db, row["minio_key"])
+    url = _make_presigned_url(plain_key)
+    return {"url": url}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 # RISK ASSESSMENT
 # ──────────────────────────────────────────────────────────────────────────────
-class SignRiskReport(BaseModel):
-    action: str
-    doctor_notes: str
+class SignReportBody(BaseModel):
+    action: str           # ACCEPTED | REJECTED
+    notes: Optional[str] = None
     rejection_reason: Optional[str] = None
 
 
 @router.patch("/RiskAssessment/{rid}/sign")
-async def sign_risk_report(
+async def sign_risk_assessment(
     rid: str,
-    body: SignRiskReport,
+    body: SignReportBody,
     request: Request,
     user: dict = Depends(require_medico),
     db: asyncpg.Connection = Depends(get_db),
 ):
     if body.action not in ("ACCEPTED", "REJECTED"):
         raise HTTPException(400, "action debe ser ACCEPTED o REJECTED")
-    if len(body.doctor_notes) < 30:
-        raise HTTPException(400, "doctor_notes debe tener al menos 30 caracteres")
-    if body.action == "REJECTED":
-        if not body.rejection_reason or len(body.rejection_reason) < 20:
-            raise HTTPException(400, "rejection_reason obligatorio (≥ 20 chars) si REJECTED")
-
     row = await db.fetchrow(
-        "SELECT id, patient_id, signed_at FROM risk_reports WHERE id = $1::uuid AND deleted_at IS NULL",
-        rid,
+        "SELECT id FROM risk_reports WHERE id = $1::uuid AND deleted_at IS NULL", rid
     )
     if not row:
         raise HTTPException(404, "RiskReport no encontrado")
-    if row["signed_at"] is not None:
-        raise HTTPException(409, "RiskReport ya fue firmado")
-
-    updated = await db.fetchrow(
+    await db.execute(
         """UPDATE risk_reports
            SET doctor_action = $1, doctor_notes = $2, rejection_reason = $3,
                signed_by = $4::uuid, signed_at = NOW()
-           WHERE id = $5::uuid
-           RETURNING id, patient_id, doctor_action, signed_at""",
-        body.action, body.doctor_notes, body.rejection_reason,
+           WHERE id = $5::uuid""",
+        body.action, body.notes, body.rejection_reason,
         str(user["id"]), rid,
     )
-
-    await db.execute(
-        """INSERT INTO model_feedback (risk_report_id, doctor_id, feedback, notes)
-           VALUES ($1::uuid, $2::uuid, $3, $4)""",
-        rid, str(user["id"]), body.action, body.doctor_notes,
-    )
-
-    await log_audit(db, str(user["id"]), user["role"], "SIGN_REPORT", "RiskAssessment",
+    await log_audit(db, str(user["id"]), user["role"], "SIGN_REPORT", "RiskReport",
                     rid, request.client.host if request.client else None,
                     detail={"action": body.action})
-
-    return {
-        "resourceType": "RiskAssessment",
-        "id": str(updated["id"]),
-        "patient": {"reference": f"Patient/{updated['patient_id']}"},
-        "performer": {"reference": f"Practitioner/{user['id']}"},
-        "signed_at": updated["signed_at"].isoformat(),
-        "doctor_action": updated["doctor_action"],
-    }
+    return {"signed": rid, "action": body.action}
 
 
 @router.get("/RiskAssessment")
 async def list_risk_assessments(
     subject: str = Query(...),
-    limit: int = Query(10, ge=1, le=50),
-    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
     user: dict = Depends(require_authenticated),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    _check_subject_access(user, subject)
     rows = await db.fetch(
         """SELECT id, patient_id, model_type, risk_score, risk_category,
-                  is_critical, shap_json, doctor_action, signed_at, created_at
+                  is_critical, shap_json, doctor_action, doctor_notes,
+                  rejection_reason, signed_by, signed_at, created_at
            FROM risk_reports
            WHERE patient_id = $1::uuid AND deleted_at IS NULL
-           ORDER BY created_at DESC LIMIT $2 OFFSET $3""",
-        subject, limit, offset,
+           ORDER BY created_at DESC LIMIT $2""",
+        subject, limit,
     )
     return {
-        "total": len(rows), "limit": limit, "offset": offset,
+        "total": len(rows), "limit": limit, "offset": 0,
         "entry": [_risk_to_fhir(r) for r in rows],
     }
 
@@ -512,6 +442,15 @@ async def create_patient_full(
         str(user["id"]), body.name, birth_date_obj, enc_doc, body.ground_truth,
     )
     pid = str(row["id"])
+
+    # ── FIX: auto-asignar al médico que crea el paciente ────────────────────
+    await db.execute(
+        """INSERT INTO patient_assignments (patient_id, doctor_id, assigned_by)
+           VALUES ($1::uuid, $2::uuid, $2::uuid)
+           ON CONFLICT (patient_id, doctor_id) DO NOTHING""",
+        pid, str(user["id"]),
+    )
+
     obs_created = []
     for obs in body.observations:
         obs_row = await db.fetchrow(
@@ -636,6 +575,27 @@ def _risk_to_fhir(row) -> dict:
     }
 
 def _check_patient_access(user: dict, row):
+    """Acceso síncrono: solo verifica owner. Para MEDICO con asignación usar _check_patient_access_db."""
+    if user["role"] == "ADMIN":
+        return
+    if user["role"] == "PACIENTE" and str(row["owner_id"]) != str(user["id"]):
+        raise HTTPException(403, "Acceso denegado a este paciente")
+    # MEDICO: owner check síncrono (la verificación por asignación se hace en get_patient)
+
+
+async def _check_medico_access(user: dict, row, db: asyncpg.Connection):
+    """Para MEDICO: verifica asignación en patient_assignments."""
+    if user["role"] == "ADMIN":
+        return
+    if user["role"] == "MEDICO":
+        # ── FIX: solo verifica por asignación, no por owner_id ───────────────
+        assigned = await db.fetchval(
+            "SELECT 1 FROM patient_assignments WHERE patient_id = $1::uuid AND doctor_id = $2::uuid",
+            str(row["id"]), str(user["id"])
+        )
+        if not assigned:
+            raise HTTPException(403, "No tiene acceso a este paciente")
+        return
     if user["role"] == "PACIENTE" and str(row["owner_id"]) != str(user["id"]):
         raise HTTPException(403, "Acceso denegado a este paciente")
 

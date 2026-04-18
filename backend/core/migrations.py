@@ -125,13 +125,25 @@ CREATE TABLE IF NOT EXISTS consent (
     ip_address     INET
 );
 
+-- ── C3: patient_assignments (médico ↔ paciente) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS patient_assignments (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    patient_id  UUID NOT NULL REFERENCES patients(id),
+    doctor_id   UUID NOT NULL REFERENCES users(id),
+    assigned_by UUID REFERENCES users(id),
+    assigned_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(patient_id, doctor_id)
+);
+
 -- ── Indexes ──────────────────────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_patients_owner     ON patients(owner_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_observations_pat   ON observations(patient_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_risk_reports_pat   ON risk_reports(patient_id) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_audit_log_user     ON audit_log(user_id);
-CREATE INDEX IF NOT EXISTS idx_audit_log_action   ON audit_log(action);
-CREATE INDEX IF NOT EXISTS idx_inference_status   ON inference_queue(status);
+CREATE INDEX IF NOT EXISTS idx_patients_owner       ON patients(owner_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_observations_pat     ON observations(patient_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_risk_reports_pat     ON risk_reports(patient_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_audit_log_user       ON audit_log(user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action     ON audit_log(action);
+CREATE INDEX IF NOT EXISTS idx_inference_status     ON inference_queue(status);
+CREATE INDEX IF NOT EXISTS idx_assignments_doctor   ON patient_assignments(doctor_id);
+CREATE INDEX IF NOT EXISTS idx_assignments_patient  ON patient_assignments(patient_id);
 """
 
 if __name__ == "__main__":
