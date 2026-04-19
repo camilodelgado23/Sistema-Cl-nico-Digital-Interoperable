@@ -282,7 +282,7 @@ function TabImagenes({ patientId, role }) {
 
   return (
     <div className="tab-content" style={{display:'flex',flexDirection:'column',gap:'1.25rem'}}>
-      {role === 'MEDICO' && (
+      {role !== 'PACIENTE' && (
         <div className="card">
           <div className="card-header"><span className="card-icon">📤</span><h3>Subir imagen</h3></div>
           <div style={{display:'flex',gap:'0.75rem',alignItems:'center',flexWrap:'wrap'}}>
@@ -528,15 +528,92 @@ function TabAnalisis({ patientId, onCritical }) {
   )
 }
 
+// ── Formulario de firma aislado por reporte (fix: estado compartido) ──────────
+function SignForm({ rep, onSigned, onCancel }) {
+  const [action,    setAction]    = useState(null)
+  const [notes,     setNotes]     = useState('')
+  const [rejection, setRejection] = useState('')
+  const [saving,    setSaving]    = useState(false)
+
+  const canSubmit = action && notes.length >= 30 && (action !== 'REJECTED' || rejection.length >= 20)
+
+  const submit = async () => {
+    if (!canSubmit) return
+    setSaving(true)
+    try {
+      await fhirAPI.signReport(rep.id, {
+        action,
+        doctor_notes: notes,
+        rejection_reason: action === 'REJECTED' ? rejection : undefined,
+      })
+      onSigned?.()
+    } catch (e) {
+      alert('Error al firmar: ' + (e.response?.data?.detail || e.message))
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div style={{borderTop:'1px solid var(--border-subtle)',paddingTop:'1rem',
+      display:'flex',flexDirection:'column',gap:'0.75rem'}}>
+      <div style={{fontSize:'0.85rem',fontWeight:600,color:'var(--text-primary)'}}>
+        ✍ Firmar diagnóstico
+      </div>
+      <div style={{display:'flex',gap:'0.5rem'}}>
+        <button
+          className={`btn ${action==='ACCEPTED'?'btn-success':'btn-ghost'} btn-sm`}
+          style={{flex:1,boxShadow:action==='ACCEPTED'?'0 0 12px rgba(34,197,94,0.25)':'none'}}
+          onClick={()=>setAction('ACCEPTED')}>
+          ✅ Aceptar diagnóstico
+        </button>
+        <button
+          className={`btn ${action==='REJECTED'?'btn-danger':'btn-ghost'} btn-sm`}
+          style={{flex:1,boxShadow:action==='REJECTED'?'0 0 12px rgba(220,38,38,0.25)':'none'}}
+          onClick={()=>setAction('REJECTED')}>
+          ❌ Rechazar diagnóstico
+        </button>
+      </div>
+      <div>
+        <textarea
+          className="input" rows={2}
+          placeholder="Observaciones clínicas (mín. 30 chars)…"
+          value={notes} onChange={e=>setNotes(e.target.value)}
+          style={{resize:'vertical',width:'100%'}}/>
+        <div style={{fontSize:'0.72rem',color:notes.length>=30?'var(--success)':'var(--text-tertiary)',marginTop:'0.2rem'}}>
+          {notes.length}/30 caracteres
+        </div>
+      </div>
+      {action==='REJECTED' && (
+        <div>
+          <textarea
+            className="input" rows={2}
+            placeholder="Justificación del rechazo (mín. 20 chars)…"
+            value={rejection} onChange={e=>setRejection(e.target.value)}
+            style={{resize:'vertical',width:'100%'}}/>
+          <div style={{fontSize:'0.72rem',color:rejection.length>=20?'var(--success)':'var(--text-tertiary)',marginTop:'0.2rem'}}>
+            {rejection.length}/20 caracteres
+          </div>
+        </div>
+      )}
+      <div style={{display:'flex',gap:'0.5rem'}}>
+        <button
+          className="btn btn-primary btn-sm"
+          disabled={saving||!canSubmit}
+          onClick={submit}>
+          {saving?'Guardando…':'✍ Confirmar firma'}
+        </button>
+        <button className="btn btn-ghost btn-sm" onClick={onCancel}>Cancelar</button>
+      </div>
+    </div>
+  )
+}
+
 // ── Tab Reportes ──────────────────────────────────────────────────────────────
 function TabReportes({ patientId, role, onRefreshPending }) {
-  const [reports, setReports]     = useState([])
-  const [loading, setLoading]     = useState(true)
-  const [signing, setSigning]     = useState(null)
-  const [notes, setNotes]         = useState('')
-  const [action, setAction]       = useState(null)
-  const [rejection, setRejection] = useState('')
-  const [saving, setSaving]       = useState(false)
+  const [reports,       setReports]       = useState([])
+  const [loading,       setLoading]       = useState(true)
+  const [expanded,      setExpanded]      = useState(null)
+  const [detailCache,   setDetailCache]   = useState({})
+  const [detailLoading, setDetailLoading] = useState(false)
 
   const load = useCallback(async () => {
     try { const r = await fhirAPI.listRiskReports(patientId); setReports(r.data.entry||[]) }
@@ -545,22 +622,32 @@ function TabReportes({ patientId, role, onRefreshPending }) {
 
   useEffect(()=>{load()},[load])
 
-  const openSign = (rep) => { setSigning(rep); setNotes(''); setAction(null); setRejection('') }
-
-  const submitSign = async () => {
-    if (!action||notes.length<30) return
-    if (action==='REJECTED'&&rejection.length<20) return
-    setSaving(true)
+  const fetchDetail = async (repId) => {
+    if (detailCache[repId]) return
+    setDetailLoading(true)
     try {
-      await fhirAPI.signReport(signing.id, {
-        action, doctor_notes: notes,
-        rejection_reason: action==='REJECTED'?rejection:undefined,
-      })
-      setSigning(null)
-      await load()
-      onRefreshPending?.()
-    } catch(e){alert('Error: '+(e.response?.data?.detail||e.message))}
-    finally{setSaving(false)}
+      const { data } = await fhirAPI.getRiskReport(repId)
+      setDetailCache(prev => ({ ...prev, [repId]: data }))
+    } catch(e) { console.error('Error fetching report detail:', e) }
+    finally { setDetailLoading(false) }
+  }
+
+  const toggleExpand = (repId) => {
+    const isClosing = expanded === repId
+    setExpanded(isClosing ? null : repId)
+    if (!isClosing) fetchDetail(repId)
+  }
+
+  const openSign = (repId, e) => {
+    e.stopPropagation()
+    setExpanded(repId)
+    fetchDetail(repId)
+  }
+
+  const handleSigned = async () => {
+    setExpanded(null)
+    await load()
+    onRefreshPending?.()
   }
 
   if (loading) return <div className="loading-state">Cargando reportes…</div>
@@ -569,47 +656,173 @@ function TabReportes({ patientId, role, onRefreshPending }) {
   return (
     <div className="tab-content" style={{display:'flex',flexDirection:'column',gap:'1rem'}}>
       {reports.map(rep=>{
-        const cat = rep.prediction?.[0]?.qualitativeRisk?.coding?.[0]?.display||rep.risk_category||'UNKNOWN'
-        const prob = rep.prediction?.[0]?.probabilityDecimal
+        const cat    = rep.prediction?.[0]?.qualitativeRisk?.coding?.[0]?.display||rep.risk_category||'UNKNOWN'
+        const prob   = rep.prediction?.[0]?.probabilityDecimal
         const signed = !!rep.signed_at
+        const isOpen = expanded === rep.id
+
+        // Merge con detalle completo (tiene gradcam_url, original_url)
+        const detail = detailCache[rep.id] || rep
+
+        // SHAP data — el backend puede enviar shap_values como string JSON o como objeto
+        const rawShap = detail.shap_values
+          ? (typeof detail.shap_values === 'string' ? (() => { try { return JSON.parse(detail.shap_values) } catch { return null } })() : detail.shap_values)
+          : null
+        const shapData = rawShap
+          ? Object.entries(rawShap)
+              .map(([k, v]) => ({
+                name:  LOINC_NAMES[k] || FEATURE_INDEX_NAMES[Number(k)] || k,
+                value: Math.abs(Number(v)),
+                raw:   Number(v),
+              }))
+              .sort((a,b) => b.value - a.value)
+              .slice(0, 8)
+          : []
 
         return (
-          <div key={rep.id} className="card" style={{border:rep.is_critical&&!signed?'1px solid var(--danger)':'1px solid var(--border-subtle)'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'0.75rem'}}>
+          <div key={rep.id} className="card" style={{
+            border: rep.is_critical&&!signed ? '1px solid var(--danger)' : '1px solid var(--border-subtle)',
+            background: rep.is_critical&&!signed ? 'var(--critical-dim)' : undefined,
+            cursor: 'pointer',
+            transition: 'border-color 0.15s',
+          }}>
+            {/* ── Cabecera clickeable ── */}
+            <div onClick={()=>toggleExpand(rep.id)}
+              style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',flexWrap:'wrap',gap:'0.75rem'}}>
               <div>
                 <div style={{display:'flex',alignItems:'center',gap:'0.75rem',marginBottom:'0.5rem'}}>
-                  <span className="badge" style={{background:(RISK_COLORS[cat]||'#888')+'22',color:RISK_COLORS[cat]||'var(--text-secondary)',border:`1px solid ${(RISK_COLORS[cat]||'#888')}55`}}>
+                  <span className="badge" style={{
+                    background:(RISK_COLORS[cat]||'#888')+'22',
+                    color:RISK_COLORS[cat]||'var(--text-secondary)',
+                    border:`1px solid ${(RISK_COLORS[cat]||'#888')}55`,
+                  }}>
                     {cat}
                   </span>
-                  <span style={{color:'var(--text-tertiary)',fontSize:'0.8rem',fontFamily:'var(--font-mono)'}}>{rep.method||'ML'}</span>
+                  <span style={{color:'var(--text-tertiary)',fontSize:'0.8rem',fontFamily:'var(--font-mono)'}}>{rep.method||rep.model_type||'ML'}</span>
                   {rep.is_critical&&<span style={{color:'var(--danger)',fontSize:'0.8rem'}}>🚨 CRÍTICO</span>}
                 </div>
                 <div style={{fontSize:'0.875rem',color:'var(--text-secondary)'}}>
                   Score: <strong style={{color:'var(--text-primary)'}}>{prob!=null?`${(prob*100).toFixed(1)}%`:'—'}</strong>
                   {' · '}{rep.occurrenceDateTime?new Date(rep.occurrenceDateTime).toLocaleString('es-CO'):'—'}
                 </div>
-                {signed&&<div style={{fontSize:'0.8rem',color:'var(--success)',marginTop:'0.25rem'}}>
-                  ✅ Firmado · {rep.doctor_action} · {new Date(rep.signed_at).toLocaleString('es-CO')}
-                </div>}
+                {signed&&(
+                  <div style={{fontSize:'0.8rem',marginTop:'0.25rem',
+                    color: rep.doctor_action==='ACCEPTED'?'var(--success)':'var(--danger)'}}>
+                    ✅ Firmado · {rep.doctor_action} · {new Date(rep.signed_at).toLocaleString('es-CO')}
+                  </div>
+                )}
               </div>
-              {!signed&&role==='MEDICO'&&(
-                <button className="btn btn-primary btn-sm" onClick={()=>openSign(rep)}>✍ Firmar</button>
-              )}
+              <div style={{display:'flex',gap:'0.5rem',alignItems:'center'}}>
+                {!signed&&role!=='PACIENTE'&&(
+                  <button className="btn btn-primary btn-sm" onClick={(e)=>openSign(rep.id,e)}>✍ Firmar</button>
+                )}
+                <span style={{color:'var(--text-tertiary)',fontSize:'1rem',transition:'transform 0.2s',
+                  display:'inline-block',transform:isOpen?'rotate(180deg)':'rotate(0deg)'}}>▾</span>
+              </div>
             </div>
-            {signing?.id===rep.id&&(
-              <div style={{marginTop:'1rem',borderTop:'1px solid var(--border-subtle)',paddingTop:'1rem',display:'flex',flexDirection:'column',gap:'0.75rem'}}>
-                <div style={{display:'flex',gap:'0.5rem'}}>
-                  <button className={`btn ${action==='ACCEPTED'?'btn-success':'btn-ghost'} btn-sm`} style={{flex:1}} onClick={()=>setAction('ACCEPTED')}>✅ Aceptar</button>
-                  <button className={`btn ${action==='REJECTED'?'btn-danger':'btn-ghost'} btn-sm`} style={{flex:1}} onClick={()=>setAction('REJECTED')}>❌ Rechazar</button>
+
+            {/* ── Detalle expandido ── */}
+            {isOpen && (
+              <div style={{marginTop:'1.25rem',borderTop:'1px solid var(--border-subtle)',paddingTop:'1.25rem',
+                display:'flex',flexDirection:'column',gap:'1.25rem'}}>
+
+                {/* Score grande */}
+                <div style={{display:'flex',gap:'2rem',flexWrap:'wrap'}}>
+                  <div style={{textAlign:'center'}}>
+                    <div style={{fontSize:'2.5rem',fontWeight:800,fontFamily:'var(--font-display)',
+                      color:RISK_COLORS[cat]||'var(--text-primary)'}}>
+                      {prob!=null?`${(prob*100).toFixed(1)}%`:'—'}
+                    </div>
+                    <div style={{color:'var(--text-tertiary)',fontSize:'0.8rem'}}>Score de riesgo</div>
+                  </div>
+                  <div style={{textAlign:'center'}}>
+                    <div style={{fontSize:'1.5rem',fontWeight:700,color:RISK_COLORS[cat]||'var(--text-primary)'}}>
+                      {cat}
+                    </div>
+                    <div style={{color:'var(--text-tertiary)',fontSize:'0.8rem'}}>Categoría</div>
+                  </div>
+                  <div style={{textAlign:'center'}}>
+                    <div style={{fontSize:'1.25rem',fontWeight:600,color:'var(--cyan)'}}>
+                      {rep.method||rep.model_type||'ML'}
+                    </div>
+                    <div style={{color:'var(--text-tertiary)',fontSize:'0.8rem'}}>Modelo</div>
+                  </div>
                 </div>
-                <textarea className="input" rows={2} placeholder={`Observaciones clínicas (mín. 30 chars)… ${notes.length}/30`} value={notes} onChange={e=>setNotes(e.target.value)} style={{resize:'vertical'}}/>
-                {action==='REJECTED'&&<textarea className="input" rows={2} placeholder={`Justificación (mín. 20 chars)… ${rejection.length}/20`} value={rejection} onChange={e=>setRejection(e.target.value)} style={{resize:'vertical'}}/>}
-                <div style={{display:'flex',gap:'0.5rem'}}>
-                  <button className="btn btn-primary btn-sm" disabled={saving||!action||notes.length<30||(action==='REJECTED'&&rejection.length<20)} onClick={submitSign}>
-                    {saving?'Guardando…':'✍ Confirmar firma'}
-                  </button>
-                  <button className="btn btn-ghost btn-sm" onClick={()=>setSigning(null)}>Cancelar</button>
+
+                {/* SHAP — datos del reporte expandido, no del último ejecutado */}
+                {shapData.length > 0 && (
+                  <div>
+                    <div style={{fontSize:'0.8rem',color:'var(--text-tertiary)',fontWeight:600,
+                      marginBottom:'0.75rem',textTransform:'uppercase',letterSpacing:'0.05em'}}>
+                      🔍 Explicabilidad SHAP
+                    </div>
+                    <ResponsiveContainer width="100%" height={200}>
+                      <BarChart data={shapData} layout="vertical" margin={{top:4,right:24,left:80,bottom:4}}>
+                        <XAxis type="number" tick={{fill:'var(--text-tertiary)',fontSize:11}}/>
+                        <YAxis dataKey="name" type="category" tick={{fill:'var(--text-secondary)',fontSize:12}}/>
+                        <Tooltip contentStyle={{background:'var(--surface-2)',border:'1px solid var(--border-subtle)',
+                          color:'var(--text-primary)',borderRadius:8}} formatter={v=>[v.toFixed(4),'SHAP']}/>
+                        <Bar dataKey="value" radius={[0,4,4,0]}>
+                          {shapData.map((e,i)=><Cell key={i} fill={e.raw>=0?'var(--cyan)':'var(--danger)'}/>)}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                )}
+
+                {/* Grad-CAM — usa el detalle completo del reporte */}
+                {detailLoading && expanded === rep.id && !detail.gradcam_url && (
+                  <div style={{fontSize:'0.8rem',color:'var(--text-tertiary)'}}>⏳ Cargando imágenes...</div>
+                )}
+                {detail.gradcam_url && (
+                  <div>
+                    <div style={{fontSize:'0.8rem',color:'var(--text-tertiary)',fontWeight:600,
+                      marginBottom:'0.75rem',textTransform:'uppercase',letterSpacing:'0.05em'}}>
+                      🧠 Grad-CAM — Zonas de atención
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'1rem'}}>
+                      <div>
+                        <p style={{fontSize:'0.75rem',color:'var(--text-tertiary)',marginBottom:'0.4rem'}}>Imagen original</p>
+                        <ImageViewer src={detail.original_url||''} alt="Original"/>
+                      </div>
+                      <div>
+                        <p style={{fontSize:'0.75rem',color:'var(--text-tertiary)',marginBottom:'0.4rem'}}>Grad-CAM superpuesto</p>
+                        <ImageViewer src={detail.gradcam_url} alt="Grad-CAM"/>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Disclaimer */}
+                <div style={{padding:'0.625rem 0.875rem',background:'var(--surface-2)',
+                  borderRadius:'var(--radius-sm)',fontSize:'0.8rem',color:'var(--text-secondary)',lineHeight:1.5}}>
+                  ⚠️ <strong>Disclaimer IA:</strong> Resultado generado por IA de apoyo diagnóstico. No reemplaza criterio médico.
                 </div>
+
+                {/* Formulario firma — componente aislado con su propio estado */}
+                {!signed && role !== 'PACIENTE' && (
+                  <SignForm
+                    rep={rep}
+                    onSigned={handleSigned}
+                    onCancel={()=>setExpanded(null)}
+                  />
+                )}
+
+                {/* Estado si ya firmado */}
+                {signed && (
+                  <div style={{
+                    padding:'0.75rem 1rem',borderRadius:'var(--radius-sm)',
+                    background: rep.doctor_action==='ACCEPTED'?'rgba(34,197,94,0.1)':'rgba(220,38,38,0.1)',
+                    border: `1px solid ${rep.doctor_action==='ACCEPTED'?'rgba(34,197,94,0.3)':'rgba(220,38,38,0.3)'}`,
+                    color: rep.doctor_action==='ACCEPTED'?'var(--success)':'var(--danger)',
+                    fontSize:'0.875rem',fontWeight:600,
+                  }}>
+                    {rep.doctor_action==='ACCEPTED'?'✅ Diagnóstico aceptado por médico':'❌ Diagnóstico rechazado por médico'}
+                    <span style={{fontWeight:400,color:'var(--text-tertiary)',marginLeft:'0.75rem',fontSize:'0.8rem'}}>
+                      {new Date(rep.signed_at).toLocaleString('es-CO')}
+                    </span>
+                  </div>
+                )}
               </div>
             )}
           </div>

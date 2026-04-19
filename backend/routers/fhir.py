@@ -400,7 +400,8 @@ async def get_risk_assessment(
 ):
     row = await db.fetchrow(
         """SELECT id, patient_id, model_type, risk_score, risk_category,
-                  is_critical, shap_json, doctor_action, doctor_notes,
+                  is_critical, shap_json, gradcam_url, original_url,
+                  doctor_action, doctor_notes,
                   rejection_reason, signed_by, signed_at, created_at
            FROM risk_reports
            WHERE id = $1::uuid AND deleted_at IS NULL""",
@@ -604,6 +605,8 @@ def _risk_to_fhir(row) -> dict:
         }],
         "is_critical": row.get("is_critical", False),
         "shap_values": row.get("shap_json"),
+        "gradcam_url": row.get("gradcam_url"),
+        "original_url": row.get("original_url"),
         "doctor_action": row.get("doctor_action"),
         "signed_at": row["signed_at"].isoformat() if row.get("signed_at") else None,
         "occurrenceDateTime": row["created_at"].isoformat(),
