@@ -5,7 +5,7 @@ import toast from 'react-hot-toast'
 import './Layout.css'
 
 const NAV = [
-  { path: '/dashboard', label: 'Pacientes',      icon: '◉', roles: ['ADMIN','MEDICO','PACIENTE'] },
+  { path: '/dashboard', label: 'Pacientes', icon: '◉', roles: ['ADMIN','MEDICO'] },
   { path: '/admin',     label: 'Administración', icon: '⬡', roles: ['ADMIN'] },
 ]
 

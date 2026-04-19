@@ -97,8 +97,6 @@ export const fhirAPI = {
 }
 
 // ── Inference API ─────────────────────────────────────────────────────────────
-const ORCHESTRATOR_URL = import.meta.env.VITE_ORCHESTRATOR_URL || 'http://localhost:8003'
-
 export const inferAPI = {
   request: (patientId, modelType) => {
     const { userId } = useAuthStore.getState()
@@ -108,8 +106,14 @@ export const inferAPI = {
       requested_by: userId,
     })
   },
-  status: (taskId) => api.get(`/infer/${taskId}`),
-  result: (taskId) => axios.get(`${ORCHESTRATOR_URL}/infer/${taskId}`),
+  status: (taskId) =>
+    api.get(`/infer/${taskId}`),
+
+  // ✅ Usa el backend como proxy — evita CORS con el orquestador directo
+  // El endpoint /infer/{id}/result devuelve el resultado completo incluyendo
+  // shap_values, gradcam_url, original_url cuando status === DONE
+  result: (taskId) =>
+    api.get(`/infer/${taskId}/result`),
 }
 
 // ── Admin API ─────────────────────────────────────────────────────────────────
@@ -121,7 +125,8 @@ export const adminAPI = {
     const limit           = params?.limit           ?? 20
     const offset          = params?.offset          ?? 0
     const include_deleted = params?.include_deleted ?? false
-    return api.get('/admin/users', { params: { limit, offset, include_deleted } })
+    const role            = params?.role            ?? undefined
+    return api.get('/admin/users', { params: { limit, offset, include_deleted, role } })
   },
 
   createUser:  (body)   => api.post('/admin/users', body),
@@ -142,7 +147,6 @@ export const adminAPI = {
     params: { fmt }, responseType: fmt === 'csv' ? 'blob' : 'json'
   }),
 
-  // ── Migración masiva pacientes → usuarios PACIENTE ─────────────────────────
   migratePatientUsers: () => api.post('/admin/migrate-patients-to-users'),
 }
 
@@ -153,6 +157,14 @@ export const assignmentAPI = {
   remove:       (aid)    => api.delete(`/admin/assignments/${aid}`),
   listDoctors:  ()       => api.get('/admin/assignments/doctors'),
   listPatients: ()       => api.get('/admin/assignments/patients'),
+}
+
+// ── ARCO API (Ley 1581/2012) ──────────────────────────────────────────────────
+export const arcoAPI = {
+  submit:  (type, message) => api.post('/admin/arco-request', { type, message }),
+  list:    (params = {})   => api.get('/admin/arco-requests', { params }),
+  resolve: (id, status, resolution) =>
+    api.patch(`/admin/arco-requests/${id}/resolve`, { status, resolution }),
 }
 
 export default api

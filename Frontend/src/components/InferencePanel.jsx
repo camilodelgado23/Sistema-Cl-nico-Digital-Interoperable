@@ -88,7 +88,7 @@ export default function InferencePanel({ patientId, onNewReport }) {
   async function checkStatus(tid) {
     try {
       // Usar el endpoint /result que devuelve el reporte completo cuando está DONE
-      const r = await fetch(`${API}/infer/${tid}/result`, {
+        const r = await fetch(`${API}/infer/${tid}`, {
         headers: getAuthHeaders(),
       });
       if (!r.ok) return;

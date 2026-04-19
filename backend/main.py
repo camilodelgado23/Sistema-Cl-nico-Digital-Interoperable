@@ -121,7 +121,8 @@ async def get_inference_result(
 
     row = await db.fetchrow(
         """SELECT id, patient_id, model_type, risk_score, risk_category,
-                  is_critical, shap_json, doctor_action, signed_at, created_at
+                  is_critical, shap_json, gradcam_url, original_url,
+                  doctor_action, signed_at, created_at
            FROM risk_reports 
            WHERE id = $1::uuid AND deleted_at IS NULL""",
         result_id,
@@ -129,6 +130,14 @@ async def get_inference_result(
 
     if not row:
         return task
+
+    import json as _json
+    shap_values = None
+    if row["shap_json"]:
+        try:
+            shap_values = _json.loads(row["shap_json"])
+        except Exception:
+            shap_values = row["shap_json"]
 
     snomed_map = {
         "LOW": "281414001",
@@ -142,15 +151,17 @@ async def get_inference_result(
     return {
         **task,
         "result": {
-            "id": str(row["id"]),
-            "patient_id": str(row["patient_id"]),
-            "model_type": row["model_type"],
-            "risk_score": float(row["risk_score"]) if row["risk_score"] else None,
+            "id":            str(row["id"]),
+            "patient_id":    str(row["patient_id"]),
+            "model_type":    row["model_type"],
+            "risk_score":    float(row["risk_score"]) if row["risk_score"] else None,
             "risk_category": row["risk_category"],
-            "is_critical": row["is_critical"],
-            "shap_values": row["shap_json"],
+            "is_critical":   row["is_critical"],
+            "shap_values":   shap_values,       # ✅ parseado correctamente
+            "gradcam_url":   row["gradcam_url"], # ✅ incluido
+            "original_url":  row["original_url"],# ✅ incluido
             "doctor_action": row["doctor_action"],
-            "signed_at": row["signed_at"].isoformat() if row["signed_at"] else None,
+            "signed_at":     row["signed_at"].isoformat() if row["signed_at"] else None,
             "prediction": [
                 {
                     "probabilityDecimal": float(row["risk_score"]) if row["risk_score"] else None,

@@ -88,10 +88,16 @@ async def list_users(
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     include_deleted: bool = Query(False),
+    role: Optional[str] = Query(None),          # ← filtro de rol
     user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    where = "" if include_deleted else "WHERE deleted_at IS NULL"
+    filters = []
+    if not include_deleted:
+        filters.append("deleted_at IS NULL")
+    if role and role in ("ADMIN", "MEDICO", "PACIENTE"):
+        filters.append(f"role = '{role}'")
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
     rows = await db.fetch(
         f"""SELECT id, username, role, is_active, created_at, deleted_at
             FROM users {where}
@@ -522,6 +528,135 @@ def _audit_row(row) -> dict:
         "ip_address": str(row["ip_address"]) if row["ip_address"] else None,
         "result": row["result"],
         "detail": row["detail"],
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# ARCO REQUESTS (Ley 1581/2012 — Acceso, Rectificación, Cancelación, Oposición)
+# ──────────────────────────────────────────────────────────────────────────────
+from core.auth import require_authenticated   # ya importado arriba, redeclaración segura
+
+class ArcoCreate(BaseModel):
+    type: str        # ACCESO | RECTIFICACION | CANCELACION | OPOSICION
+    message: str
+
+class ArcoResolve(BaseModel):
+    status: str      # RESOLVED | REJECTED
+    resolution: str  # nota del admin
+
+
+@router.post("/arco-request", status_code=201)
+async def submit_arco(
+    body: ArcoCreate,
+    request: Request,
+    user: dict = Depends(require_authenticated),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """Paciente (o cualquier usuario autenticado) envía solicitud ARCO."""
+    if body.type not in ("ACCESO", "RECTIFICACION", "CANCELACION", "OPOSICION"):
+        raise HTTPException(400, "Tipo de solicitud inválido")
+    if len(body.message) < 20:
+        raise HTTPException(400, "La descripción debe tener al menos 20 caracteres")
+
+    # Buscar patient_id vinculado si es PACIENTE
+    patient_id = None
+    if user["role"] == "PACIENTE":
+        row = await db.fetchrow(
+            "SELECT id FROM patients WHERE patient_user_id = $1::uuid AND deleted_at IS NULL",
+            str(user["id"]),
+        )
+        if row:
+            patient_id = str(row["id"])
+
+    result = await db.fetchrow(
+        """INSERT INTO arco_requests (user_id, patient_id, type, message)
+           VALUES ($1::uuid, $2, $3, $4)
+           RETURNING id, created_at""",
+        str(user["id"]),
+        patient_id,
+        body.type,
+        body.message,
+    )
+    await log_audit(db, str(user["id"]), user["role"], "ARCO_REQUEST", "ArcoRequest",
+                    str(result["id"]), request.client.host if request.client else None,
+                    detail={"type": body.type})
+    return {"id": str(result["id"]), "created_at": result["created_at"]}
+
+
+@router.get("/arco-requests")
+async def list_arco_requests(
+    status: Optional[str] = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """Admin: listar todas las solicitudes ARCO."""
+    filters, params = [], []
+    if status:
+        params.append(status); filters.append(f"a.status = ${len(params)}")
+    where = f"WHERE {' AND '.join(filters)}" if filters else ""
+    params += [limit, offset]
+
+    rows = await db.fetch(
+        f"""SELECT a.id, a.type, a.message, a.status, a.resolution, a.created_at, a.resolved_at,
+                   u.username, u.role AS user_role,
+                   p.name AS patient_name
+            FROM arco_requests a
+            JOIN users u ON u.id = a.user_id
+            LEFT JOIN patients p ON p.id = a.patient_id
+            {where}
+            ORDER BY a.created_at DESC
+            LIMIT ${len(params)-1} OFFSET ${len(params)}""",
+        *params,
+    )
+    total = await db.fetchval(
+        f"SELECT COUNT(*) FROM arco_requests a {where}", *params[:-2]
+    )
+    return {
+        "total": total, "limit": limit, "offset": offset,
+        "entry": [_arco_row(r) for r in rows],
+    }
+
+
+@router.patch("/arco-requests/{rid}/resolve")
+async def resolve_arco(
+    rid: str,
+    body: ArcoResolve,
+    request: Request,
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """Admin: marcar solicitud ARCO como resuelta o rechazada."""
+    if body.status not in ("RESOLVED", "REJECTED"):
+        raise HTTPException(400, "Estado inválido")
+    row = await db.fetchrow("SELECT id FROM arco_requests WHERE id = $1::uuid", rid)
+    if not row:
+        raise HTTPException(404, "Solicitud no encontrada")
+    await db.execute(
+        """UPDATE arco_requests
+           SET status = $1, resolution = $2, resolved_by = $3::uuid, resolved_at = NOW()
+           WHERE id = $4::uuid""",
+        body.status, body.resolution, str(user["id"]), rid,
+    )
+    await log_audit(db, str(user["id"]), user["role"], "ARCO_RESOLVE", "ArcoRequest",
+                    rid, request.client.host if request.client else None,
+                    detail={"status": body.status})
+    return {"resolved": rid, "status": body.status}
+
+
+def _arco_row(row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "type": row["type"],
+        "message": row["message"],
+        "status": row["status"],
+        "resolution": row["resolution"],
+        "username": row["username"],
+        "user_role": row["user_role"],
+        "patient_name": row["patient_name"],
+        "created_at": row["created_at"].isoformat(),
+        "resolved_at": row["resolved_at"].isoformat() if row["resolved_at"] else None,
     }
 
 

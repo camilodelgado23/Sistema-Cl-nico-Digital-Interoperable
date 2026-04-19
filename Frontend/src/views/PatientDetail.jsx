@@ -373,13 +373,14 @@ function TabAnalisis({ patientId, onCritical }) {
           setStatus(d.status)
 
           if (d.status === 'DONE') {
-            stopPolling()
-            setRunning(false)
             if (d.result) {
-              console.log('🔍 RESULT:', JSON.stringify(d.result))
+              // ✅ Solo parar cuando el resultado completo está disponible
+              stopPolling()
+              setRunning(false)
               setResult(d.result)
               if (d.result.is_critical) onCritical(d.result)
             }
+            // Si DONE pero result aún null → condición de carrera, seguir polling
           } else if (d.status === 'ERROR') {
             stopPolling()
             setRunning(false)

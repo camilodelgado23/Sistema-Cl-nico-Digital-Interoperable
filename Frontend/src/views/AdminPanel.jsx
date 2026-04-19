@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { adminAPI, assignmentAPI } from '../services/api'
+import { adminAPI, assignmentAPI, arcoAPI } from '../services/api'
 import './AdminPanel.css'
 
 // ── Umbrales por defecto ───────────────────────────────────────────────────────
@@ -603,6 +603,7 @@ function UsersSection() {
   const [regenId,      setRegenId]      = useState(null)
   const [page,         setPage]         = useState(0)
   const [showDeleted,  setShowDeleted]  = useState(false)
+  const [roleFilter,   setRoleFilter]   = useState('')   // ← NUEVO: filtro de rol
   const LIMIT = 10
 
   const load = useCallback(async () => {
@@ -612,12 +613,13 @@ function UsersSection() {
         limit: LIMIT,
         offset: page * LIMIT,
         include_deleted: showDeleted,
+        role: roleFilter || undefined,           // ← NUEVO
       })
       setUsers(data.entry || [])
       setTotal(data.total)
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
-  }, [page, showDeleted])
+  }, [page, showDeleted, roleFilter])             // ← NUEVO dep
 
   useEffect(() => { load() }, [load])
 
@@ -665,7 +667,7 @@ function UsersSection() {
       )}
 
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flexWrap: 'wrap' }}>
           <h3 style={{ margin: 0 }}>Usuarios del sistema ({total})</h3>
           <label style={{ display: 'flex', alignItems: 'center', gap: '0.4rem',
             fontSize: '0.78rem', color: showDeleted ? 'var(--danger)' : 'var(--text-tertiary)',
@@ -678,6 +680,26 @@ function UsersSection() {
             />
             Mostrar eliminados
           </label>
+          {/* ── Filtro por rol ── */}
+          <div style={{ display: 'flex', gap: '0.375rem' }}>
+            {['', 'ADMIN', 'MEDICO', 'PACIENTE'].map(r => (
+              <button
+                key={r || 'TODOS'}
+                onClick={() => { setRoleFilter(r); setPage(0) }}
+                style={{
+                  padding: '0.25rem 0.75rem', fontSize: '0.72rem', borderRadius: '999px',
+                  border: '1px solid',
+                  borderColor: roleFilter === r ? 'var(--cyan)' : 'var(--border-subtle)',
+                  background: roleFilter === r ? 'rgba(6,182,212,0.12)' : 'transparent',
+                  color: roleFilter === r ? 'var(--cyan)' : 'var(--text-tertiary)',
+                  cursor: 'pointer', fontFamily: 'var(--font-mono)',
+                  letterSpacing: '0.04em', transition: 'all 0.15s',
+                }}
+              >
+                {r || 'TODOS'}
+              </button>
+            ))}
+          </div>
         </div>
         <button className="btn btn-primary" onClick={() => setShowCreate(true)}>
           + Crear usuario
@@ -1151,6 +1173,309 @@ function AssignmentsSection() {
   )
 }
 
+// ── Sección ARCO (Ley 1581/2012) ─────────────────────────────────────────────
+const ARCO_LABELS = {
+  ACCESO:        { label: 'Acceso',        color: '#38bdf8' },
+  RECTIFICACION: { label: 'Rectificación', color: '#f59e0b' },
+  CANCELACION:   { label: 'Cancelación',   color: '#f87171' },
+  OPOSICION:     { label: 'Oposición',     color: '#a78bfa' },
+}
+const STATUS_LABELS = {
+  PENDING:  { label: 'Pendiente', color: '#f59e0b', bg: 'rgba(245,158,11,0.1)'  },
+  RESOLVED: { label: 'Resuelta',  color: '#22c55e', bg: 'rgba(34,197,94,0.1)'   },
+  REJECTED: { label: 'Rechazada', color: '#f87171', bg: 'rgba(248,113,113,0.1)' },
+}
+
+function ArcoResolveModal({ request, onClose, onResolved }) {
+  const [status,     setStatus]     = useState('RESOLVED')
+  const [resolution, setResolution] = useState('')
+  const [saving,     setSaving]     = useState(false)
+  const [error,      setError]      = useState('')
+
+  const submit = async () => {
+    if (resolution.trim().length < 10) { setError('La resolución debe tener al menos 10 caracteres'); return }
+    setSaving(true)
+    try {
+      await arcoAPI.resolve(request.id, status, resolution.trim())
+      onResolved()
+      onClose()
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Error al resolver')
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="modal-overlay">
+      <div className="modal">
+        <div className="modal-header">
+          <h3>Resolver solicitud ARCO</h3>
+          <button className="btn-icon" onClick={onClose}>✕</button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem' }}>
+          <div style={{ background: 'var(--surface-2)', borderRadius: 'var(--radius-sm)',
+            padding: '0.75rem 1rem', fontSize: '0.85rem', lineHeight: 1.6 }}>
+            <div style={{ color: 'var(--text-tertiary)', fontSize: '0.75rem',
+              fontFamily: 'var(--font-mono)', textTransform: 'uppercase', marginBottom: '0.25rem' }}>
+              Solicitud de {request.username} · {ARCO_LABELS[request.type]?.label}
+            </div>
+            <div style={{ color: 'var(--text-primary)' }}>{request.message}</div>
+          </div>
+
+          <div>
+            <label className="form-label">Decisión</label>
+            <div style={{ display: 'flex', gap: '0.5rem' }}>
+              {[['RESOLVED', '✅ Atender'], ['REJECTED', '❌ Rechazar']].map(([val, lbl]) => (
+                <button
+                  key={val}
+                  onClick={() => setStatus(val)}
+                  style={{
+                    flex: 1, padding: '0.5rem', borderRadius: 'var(--radius-sm)',
+                    border: `1px solid ${status === val
+                      ? (val === 'RESOLVED' ? 'rgba(34,197,94,0.5)' : 'rgba(248,113,113,0.5)')
+                      : 'var(--border-subtle)'}`,
+                    background: status === val
+                      ? (val === 'RESOLVED' ? 'rgba(34,197,94,0.1)' : 'rgba(248,113,113,0.1)')
+                      : 'transparent',
+                    color: status === val
+                      ? (val === 'RESOLVED' ? '#22c55e' : '#f87171')
+                      : 'var(--text-secondary)',
+                    cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600,
+                    transition: 'all 0.15s',
+                  }}
+                >
+                  {lbl}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="form-label">Respuesta al usuario</label>
+            <textarea
+              className="input"
+              rows={3}
+              placeholder="Explique la decisión tomada (mín. 10 caracteres)…"
+              value={resolution}
+              onChange={e => { setResolution(e.target.value); setError('') }}
+              style={{ resize: 'vertical' }}
+            />
+            <div style={{ fontSize: '0.73rem', color: resolution.length >= 10
+              ? 'var(--success)' : 'var(--text-tertiary)', marginTop: '0.2rem' }}>
+              {resolution.length}/10 mínimo
+            </div>
+          </div>
+
+          {error && (
+            <div style={{ color: 'var(--danger)', fontSize: '0.8rem',
+              background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.25)',
+              borderRadius: 'var(--radius-sm)', padding: '0.4rem 0.75rem' }}>
+              ⚠️ {error}
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.25rem' }}>
+            <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
+            <button
+              className="btn btn-primary"
+              style={{ flex: 1 }}
+              disabled={saving || resolution.trim().length < 10}
+              onClick={submit}
+            >
+              {saving ? 'Guardando…' : 'Confirmar resolución'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function ArcoSection() {
+  const [requests,   setRequests]   = useState([])
+  const [total,      setTotal]      = useState(0)
+  const [loading,    setLoading]    = useState(true)
+  const [statusFilter, setStatusFilter] = useState('')
+  const [resolving,  setResolving]  = useState(null)   // request obj to resolve
+  const [page,       setPage]       = useState(0)
+  const LIMIT = 20
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const { data } = await arcoAPI.list({
+        status: statusFilter || undefined,
+        limit: LIMIT,
+        offset: page * LIMIT,
+      })
+      setRequests(data.entry || [])
+      setTotal(data.total || 0)
+    } catch (e) { console.error(e) }
+    finally { setLoading(false) }
+  }, [statusFilter, page])
+
+  useEffect(() => { load() }, [load])
+
+  const pending  = requests.filter(r => r.status === 'PENDING').length
+  const totalPages = Math.ceil(total / LIMIT)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
+      {resolving && (
+        <ArcoResolveModal
+          request={resolving}
+          onClose={() => setResolving(null)}
+          onResolved={load}
+        />
+      )}
+
+      {/* Header */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
+        <div>
+          <h3 style={{ margin: '0 0 0.25rem' }}>Solicitudes ARCO</h3>
+          <p style={{ margin: 0, fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
+            Ley 1581/2012 — Acceso, Rectificación, Cancelación, Oposición
+          </p>
+        </div>
+        {pending > 0 && (
+          <div style={{ background: 'rgba(245,158,11,0.12)', border: '1px solid rgba(245,158,11,0.35)',
+            borderRadius: 'var(--radius-sm)', padding: '0.4rem 0.875rem',
+            fontSize: '0.8rem', color: '#fbbf24', fontWeight: 600 }}>
+            ⏳ {pending} pendiente{pending > 1 ? 's' : ''}
+          </div>
+        )}
+      </div>
+
+      {/* Filtro de estado */}
+      <div style={{ display: 'flex', gap: '0.375rem' }}>
+        {[['', 'Todas'], ['PENDING', 'Pendientes'], ['RESOLVED', 'Resueltas'], ['REJECTED', 'Rechazadas']].map(([val, lbl]) => (
+          <button
+            key={val}
+            onClick={() => { setStatusFilter(val); setPage(0) }}
+            style={{
+              padding: '0.3rem 0.875rem', fontSize: '0.75rem', borderRadius: '999px',
+              border: '1px solid',
+              borderColor: statusFilter === val ? 'var(--cyan)' : 'var(--border-subtle)',
+              background: statusFilter === val ? 'rgba(6,182,212,0.12)' : 'transparent',
+              color: statusFilter === val ? 'var(--cyan)' : 'var(--text-tertiary)',
+              cursor: 'pointer', fontFamily: 'var(--font-mono)',
+              letterSpacing: '0.04em', transition: 'all 0.15s',
+            }}
+          >
+            {lbl}
+          </button>
+        ))}
+      </div>
+
+      {/* Tabla */}
+      <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
+        <div className="table-wrap">
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Tipo</th>
+                <th>Usuario / Paciente</th>
+                <th>Descripción</th>
+                <th>Estado</th>
+                <th>Fecha</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading ? (
+                <tr><td colSpan={6} style={{ textAlign: 'center', padding: '2rem',
+                  color: 'var(--text-tertiary)' }}>Cargando…</td></tr>
+              ) : requests.length === 0 ? (
+                <tr><td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem',
+                  color: 'var(--text-tertiary)' }}>
+                  {statusFilter ? 'No hay solicitudes con ese filtro' : 'No hay solicitudes ARCO registradas'}
+                </td></tr>
+              ) : requests.map(r => {
+                const tipo   = ARCO_LABELS[r.type]   || { label: r.type,   color: '#888' }
+                const estado = STATUS_LABELS[r.status] || { label: r.status, color: '#888', bg: 'transparent' }
+                return (
+                  <tr key={r.id}>
+                    <td>
+                      <span style={{ display: 'inline-block', padding: '0.2rem 0.6rem',
+                        borderRadius: '999px', fontSize: '0.72rem', fontWeight: 600,
+                        fontFamily: 'var(--font-mono)', letterSpacing: '0.04em',
+                        background: tipo.color + '18', color: tipo.color,
+                        border: `1px solid ${tipo.color}44` }}>
+                        {tipo.label}
+                      </span>
+                    </td>
+                    <td>
+                      <div style={{ fontWeight: 500, fontSize: '0.875rem' }}>{r.username}</div>
+                      {r.patient_name && (
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
+                          👤 {r.patient_name}
+                        </div>
+                      )}
+                    </td>
+                    <td style={{ maxWidth: 280 }}>
+                      <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)',
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                        maxWidth: 260 }}
+                        title={r.message}>
+                        {r.message}
+                      </div>
+                      {r.resolution && (
+                        <div style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)',
+                          fontStyle: 'italic', marginTop: '0.2rem' }}
+                          title={r.resolution}>
+                          ↪ {r.resolution.slice(0, 60)}{r.resolution.length > 60 ? '…' : ''}
+                        </div>
+                      )}
+                    </td>
+                    <td>
+                      <span style={{ display: 'inline-block', padding: '0.2rem 0.6rem',
+                        borderRadius: '999px', fontSize: '0.72rem', fontWeight: 600,
+                        background: estado.bg, color: estado.color,
+                        border: `1px solid ${estado.color}44` }}>
+                        {estado.label}
+                      </span>
+                    </td>
+                    <td style={{ fontSize: '0.78rem', color: 'var(--text-tertiary)',
+                      fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
+                      {new Date(r.created_at).toLocaleDateString('es-CO')}
+                    </td>
+                    <td>
+                      {r.status === 'PENDING' ? (
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          style={{ color: 'var(--cyan)', fontSize: '0.78rem' }}
+                          onClick={() => setResolving(r)}
+                        >
+                          ✍ Resolver
+                        </button>
+                      ) : (
+                        <span style={{ fontSize: '0.75rem', color: 'var(--text-tertiary)' }}>
+                          {r.resolved_at
+                            ? new Date(r.resolved_at).toLocaleDateString('es-CO')
+                            : '—'}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {totalPages > 1 && (
+        <div className="pagination">
+          <button className="btn btn-ghost" disabled={page === 0} onClick={() => setPage(p => p - 1)}>← Ant.</button>
+          <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)' }}>
+            {page + 1} / {totalPages}
+          </span>
+          <button className="btn btn-ghost" disabled={page >= totalPages - 1} onClick={() => setPage(p => p + 1)}>Sig. →</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Main AdminPanel ───────────────────────────────────────────────────────────
 export default function AdminPanel() {
   const [stats,           setStats]           = useState(null)
@@ -1160,7 +1485,7 @@ export default function AdminPanel() {
   const [alertsDismissed, setAlertsDismissed] = useState(false)
   const [showThresholds,  setShowThresholds]  = useState(false)
 
-  const TABS = ['Estadísticas', 'Usuarios', 'Asignaciones', 'Audit Log']
+  const TABS = ['Estadísticas', 'Usuarios', 'Asignaciones', 'Audit Log', 'ARCO']
 
   const loadStats = useCallback(async () => {
     try {
@@ -1279,6 +1604,7 @@ export default function AdminPanel() {
       {activeTab === 'Usuarios'     && <UsersSection />}
       {activeTab === 'Asignaciones' && <AssignmentsSection />}
       {activeTab === 'Audit Log'    && <AuditSection />}
+      {activeTab === 'ARCO'         && <ArcoSection />}
     </div>
   )
 }

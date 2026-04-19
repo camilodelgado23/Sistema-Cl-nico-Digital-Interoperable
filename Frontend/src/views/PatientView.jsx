@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { fhirAPI, authAPI } from '../services/api'
+import { fhirAPI, authAPI, arcoAPI } from '../services/api'
 import { useAuthStore } from '../store/auth'
 import {
   LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid
@@ -26,12 +26,21 @@ function ArcoModal({ onClose }) {
   const [type,    setType]    = useState('')
   const [message, setMessage] = useState('')
   const [sent,    setSent]    = useState(false)
+  const [sending, setSending] = useState(false)
+  const [error,   setError]   = useState('')
 
-  const submit = () => {
+  const submit = async () => {
     if (!type || message.length < 20) return
-    // En producción: POST /fhir/arco-request
-    console.log('ARCO request:', { type, message })
-    setSent(true)
+    setSending(true)
+    setError('')
+    try {
+      await arcoAPI.submit(type, message)
+      setSent(true)
+    } catch (e) {
+      setError(e.response?.data?.detail || 'Error al enviar la solicitud')
+    } finally {
+      setSending(false)
+    }
   }
 
   return (
@@ -85,15 +94,21 @@ function ArcoModal({ onClose }) {
                 {message.length}/20 mínimo
               </div>
             </div>
+            {error && (
+              <div style={{ color: '#f87171', fontSize: '0.8rem', background: 'rgba(220,38,38,0.1)',
+                borderRadius: 6, padding: '0.4rem 0.75rem', border: '1px solid rgba(220,38,38,0.3)' }}>
+                ⚠️ {error}
+              </div>
+            )}
             <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
               <button className="btn btn-ghost" onClick={onClose}>Cancelar</button>
               <button
                 className="btn btn-primary"
                 style={{ flex: 1 }}
-                disabled={!type || message.length < 20}
+                disabled={!type || message.length < 20 || sending}
                 onClick={submit}
               >
-                Enviar solicitud
+                {sending ? 'Enviando…' : 'Enviar solicitud'}
               </button>
             </div>
           </div>
@@ -105,6 +120,7 @@ function ArcoModal({ onClose }) {
 
 // ── Main PatientView ──────────────────────────────────────────────────────────
 export default function PatientView() {
+  // ✅ FIX: usar userId en lugar de user (que no existe en el store)
   const { userId } = useAuthStore()
   const navigate   = useNavigate()
 
@@ -116,10 +132,10 @@ export default function PatientView() {
   const [showArco,  setShowArco]  = useState(false)
 
   useEffect(() => {
+    // ✅ FIX: condición corregida
     if (!userId) return
     const fetchAll = async () => {
       try {
-        // Para paciente, el backend filtra y retorna su propio registro
         const listRes = await fhirAPI.listPatients({ limit: 1, offset: 0 })
         const entry   = listRes.data.entry?.[0]
         if (!entry) { setLoading(false); return }
@@ -137,6 +153,7 @@ export default function PatientView() {
       finally { setLoading(false) }
     }
     fetchAll()
+  // ✅ FIX: dependencia corregida
   }, [userId])
 
   const TABS = ['Mis datos', 'Mis observaciones', 'Mis diagnósticos']
@@ -161,7 +178,6 @@ export default function PatientView() {
 
   const initials = patient.name?.split(' ').map(w => w[0]).slice(0, 2).join('') || '?'
 
-  // Chart data desde observations
   const chartData = obs.map(o => ({
     name: LOINC_NAMES[o.code?.coding?.[0]?.code] || o.code?.coding?.[0]?.code,
     value: o.valueQuantity?.value,
@@ -169,49 +185,36 @@ export default function PatientView() {
   })).filter(d => d.value != null)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem', padding: '1.5rem' }}>
       {showArco && <ArcoModal onClose={() => setShowArco(false)} />}
 
       {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem', flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
         <div style={{
-          width: 52, height: 52, borderRadius: 'var(--radius-lg)',
-          background: 'var(--cyan-dim)', border: '1px solid var(--border-active)',
+          width: 52, height: 52, borderRadius: '50%',
+          background: 'var(--cyan-dim)', color: 'var(--cyan)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          fontFamily: 'var(--font-display)', fontSize: '1.375rem',
-          fontWeight: 700, color: 'var(--cyan)',
+          fontSize: '1.25rem', fontWeight: 700,
         }}>
           {initials}
         </div>
-        <div style={{ flex: 1 }}>
-          <h2 style={{ marginBottom: '0.25rem' }}>{patient.name}</h2>
-          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center',
-            color: 'var(--text-secondary)', fontSize: '0.875rem', flexWrap: 'wrap' }}>
-            <span>{calcAge(patient.birthDate)} años</span>
-            <span style={{ color: 'var(--border-soft)' }}>·</span>
-            <span className="badge badge-success" style={{ fontSize: '0.7rem' }}>Paciente</span>
+        <div>
+          <h2 style={{ margin: 0 }}>{patient.name}</h2>
+          <div style={{ color: 'var(--text-tertiary)', fontSize: '0.8rem' }}>
+            {calcAge(patient.birthDate)} años · Mi perfil clínico
           </div>
         </div>
-        <button
-          className="btn btn-ghost"
-          onClick={() => setShowArco(true)}
-          style={{ fontSize: '0.8rem' }}
-        >
-          📋 Solicitar corrección (ARCO)
-        </button>
       </div>
 
       {/* Tabs */}
-      <div style={{ display: 'flex', gap: '0.25rem',
-        borderBottom: '1px solid var(--border-subtle)' }}>
+      <div style={{ display: 'flex', gap: '0.25rem', borderBottom: '1px solid var(--border-subtle)' }}>
         {TABS.map(t => (
           <button key={t} onClick={() => setActiveTab(t)} style={{
             padding: '0.625rem 1rem', background: 'none', border: 'none',
             borderBottom: activeTab === t ? '2px solid var(--cyan)' : '2px solid transparent',
             color: activeTab === t ? 'var(--cyan)' : 'var(--text-secondary)',
-            fontFamily: 'var(--font-mono)', fontSize: '0.8rem',
-            letterSpacing: '0.05em', textTransform: 'uppercase',
-            cursor: 'pointer', transition: 'all 0.15s', marginBottom: '-1px',
+            fontFamily: 'var(--font-mono)', fontSize: '0.8rem', letterSpacing: '0.05em',
+            textTransform: 'uppercase', cursor: 'pointer', transition: 'all 0.15s', marginBottom: '-1px',
           }}>
             {t}
           </button>
@@ -220,8 +223,7 @@ export default function PatientView() {
 
       {/* Mis datos */}
       {activeTab === 'Mis datos' && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))',
-          gap: '1.25rem' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
           <div className="card">
             <div className="card-header">
               <span className="card-icon">👤</span>
