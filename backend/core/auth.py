@@ -11,6 +11,8 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta
 from typing import Optional
 import asyncpg
+from typing import Optional
+
 
 from core.config import settings, get_db
 

@@ -439,6 +439,161 @@ function RegenModal({ userId, onClose }) {
   )
 }
 
+// ── Panel de migración masiva pacientes → usuarios PACIENTE ───────────────────
+function MigrationPanel() {
+  const [status,    setStatus]    = useState('idle') // idle | loading | done | error
+  const [result,    setResult]    = useState(null)
+  const [copiedRow, setCopiedRow] = useState(null)
+
+  const copyField = (text, key) => {
+    navigator.clipboard.writeText(text)
+    setCopiedRow(key)
+    setTimeout(() => setCopiedRow(null), 2000)
+  }
+
+  const copyAllCSV = () => {
+    if (!result?.entry?.length) return
+    const header = 'patient_name,username,access_key,permission_key'
+    const rows = result.entry.map(
+      e => `"${e.patient_name}","${e.username}","${e.access_key}","${e.permission_key}"`
+    )
+    navigator.clipboard.writeText([header, ...rows].join('\n'))
+  }
+
+  const run = async () => {
+    setStatus('loading')
+    setResult(null)
+    try {
+      const { data } = await adminAPI.migratePatientUsers()
+      setResult(data)
+      setStatus('done')
+    } catch (e) {
+      setResult({ error: e.response?.data?.detail || e.message })
+      setStatus('error')
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="card-header">
+        <span className="card-icon">🔄</span>
+        <div>
+          <h3 style={{ margin: 0 }}>Migrar pacientes existentes a usuarios</h3>
+          <p style={{ margin: '0.25rem 0 0', fontSize: '0.8rem', color: 'var(--text-tertiary)' }}>
+            Crea un usuario con rol <strong style={{ color: 'var(--cyan)' }}>PACIENTE</strong> para
+            cada paciente que aún no tenga credenciales de acceso al sistema.
+          </p>
+        </div>
+      </div>
+
+      {status === 'idle' && (
+        <div style={{ background: 'rgba(245,158,11,0.08)', border: '1px solid rgba(245,158,11,0.3)',
+          borderRadius: 'var(--radius-sm)', padding: '0.625rem 0.875rem',
+          fontSize: '0.8rem', color: '#fbbf24', marginBottom: '0.875rem' }}>
+          ⚠️ Las claves generadas se mostrarán <strong>una sola vez</strong> — descárgalas antes de cerrar.
+        </div>
+      )}
+
+      {status !== 'done' && (
+        <button
+          className="btn btn-primary"
+          style={{ alignSelf: 'flex-start', opacity: status === 'loading' ? 0.6 : 1 }}
+          disabled={status === 'loading'}
+          onClick={run}
+        >
+          {status === 'loading' ? '⏳ Procesando…' : '▶ Ejecutar migración'}
+        </button>
+      )}
+
+      {status === 'error' && (
+        <div style={{ color: 'var(--danger)', fontSize: '0.85rem',
+          background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.3)',
+          borderRadius: 'var(--radius-sm)', padding: '0.5rem 0.75rem', marginTop: '0.75rem' }}>
+          ⚠️ {result?.error}
+        </div>
+      )}
+
+      {status === 'done' && result && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '0.875rem', marginTop: '0.75rem' }}>
+          <div style={{ color: 'var(--success)', fontWeight: 600, fontSize: '0.9rem' }}>
+            ✅ {result.message}
+          </div>
+
+          {result.entry?.length > 0 && (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between',
+                alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <span style={{ fontSize: '0.78rem', color: '#f59e0b', fontFamily: 'var(--font-mono)' }}>
+                  🔑 Guarda estas credenciales — no se volverán a mostrar
+                </span>
+                <button className="btn btn-ghost btn-sm" onClick={copyAllCSV}>
+                  📋 Copiar todo como CSV
+                </button>
+              </div>
+
+              <div className="table-wrap" style={{ borderRadius: 'var(--radius-sm)',
+                border: '1px solid var(--border-subtle)', overflow: 'auto' }}>
+                <table className="table" style={{ fontSize: '0.8rem' }}>
+                  <thead>
+                    <tr>
+                      <th>Paciente</th>
+                      <th>Usuario</th>
+                      <th>X-Access-Key</th>
+                      <th>X-Permission-Key</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.entry.map((row, i) => (
+                      <tr key={i}>
+                        <td>{row.patient_name}</td>
+                        <td style={{ color: 'var(--cyan)', fontFamily: 'var(--font-mono)' }}>
+                          {row.username}
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
+                            <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem',
+                              color: 'var(--text-secondary)', wordBreak: 'break-all' }}>
+                              {row.access_key}
+                            </code>
+                            <button className="btn btn-ghost btn-sm"
+                              style={{ whiteSpace: 'nowrap', padding: '0.1rem 0.4rem', fontSize: '0.7rem' }}
+                              onClick={() => copyField(row.access_key, `ak-${i}`)}>
+                              {copiedRow === `ak-${i}` ? '✓' : '⧉'}
+                            </button>
+                          </div>
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.375rem' }}>
+                            <code style={{ fontFamily: 'var(--font-mono)', fontSize: '0.75rem',
+                              color: 'var(--text-secondary)', wordBreak: 'break-all' }}>
+                              {row.permission_key}
+                            </code>
+                            <button className="btn btn-ghost btn-sm"
+                              style={{ whiteSpace: 'nowrap', padding: '0.1rem 0.4rem', fontSize: '0.7rem' }}
+                              onClick={() => copyField(row.permission_key, `pk-${i}`)}>
+                              {copiedRow === `pk-${i}` ? '✓' : '⧉'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <button className="btn btn-ghost"
+                style={{ alignSelf: 'flex-start', fontSize: '0.8rem' }}
+                onClick={run}>
+                🔄 Volver a ejecutar (nuevos pacientes sin usuario)
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Sección Usuarios ──────────────────────────────────────────────────────────
 function UsersSection() {
   const [users,        setUsers]        = useState([])
@@ -539,6 +694,8 @@ function UsersSection() {
           🗑 Mostrando todos los usuarios, incluidos los eliminados con soft-delete.
         </div>
       )}
+
+      <MigrationPanel />
 
       <div className="card" style={{ padding: 0, overflow: 'hidden' }}>
         <div className="table-wrap">

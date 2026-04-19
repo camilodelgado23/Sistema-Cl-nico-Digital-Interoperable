@@ -11,20 +11,21 @@ export default function HabeasModal({ onAccepted }) {
   if (!needsHabeas) return null
 
   const handleAccept = async () => {
-    if (!checked) return
+    if (!checked || loading) return // 👈 IMPORTANTE
+
     setLoading(true)
     try {
-      await authAPI.acceptHabeas('1.0')
+      await authAPI.acceptHabeasData('1.0')
       useAuthStore.setState({ needsHabeas: false })
       toast.success('Consentimiento registrado')
       onAccepted?.()
     } catch (e) {
+      console.error(e) // 👈 añade esto para debug
       toast.error('Error al registrar consentimiento')
     } finally {
       setLoading(false)
     }
   }
-
   return (
     <div style={{
       position: 'fixed', inset: 0, zIndex: 9999,

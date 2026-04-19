@@ -105,7 +105,7 @@ function ArcoModal({ onClose }) {
 
 // ── Main PatientView ──────────────────────────────────────────────────────────
 export default function PatientView() {
-  const { user }   = useAuthStore()
+  const { userId } = useAuthStore()
   const navigate   = useNavigate()
 
   const [patient,   setPatient]   = useState(null)
@@ -116,7 +116,7 @@ export default function PatientView() {
   const [showArco,  setShowArco]  = useState(false)
 
   useEffect(() => {
-    if (!user?.id) return
+    if (!userId) return
     const fetchAll = async () => {
       try {
         // Para paciente, el backend filtra y retorna su propio registro
@@ -137,7 +137,7 @@ export default function PatientView() {
       finally { setLoading(false) }
     }
     fetchAll()
-  }, [user])
+  }, [userId])
 
   const TABS = ['Mis datos', 'Mis observaciones', 'Mis diagnósticos']
 

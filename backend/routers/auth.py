@@ -3,6 +3,7 @@ routers/auth.py — Login, Logout, Habeas Data consent
 """
 from fastapi import APIRouter, Depends, Request, HTTPException
 from pydantic import BaseModel
+from typing import Optional
 import asyncpg
 
 from core.config import get_db
@@ -20,6 +21,7 @@ class LoginResponse(BaseModel):
     token_type: str = "bearer"
     role: str
     user_id: str
+    patient_id: Optional[str] = None
     needs_habeas_data: bool
 
 
@@ -29,13 +31,24 @@ async def login(
     user: dict = Depends(validate_api_keys),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    """
-    Validates X-Access-Key + X-Permission-Key.
-    Returns JWT + flag indicating if Habeas Data modal must be shown.
-    """
     token = create_access_token(str(user["id"]), user["role"])
 
-    # Check if user has accepted Habeas Data
+    # ── 🔥 Obtener patient_id si es PACIENTE ───────────────────────
+    patient_id = None
+    if user["role"] == "PACIENTE":
+        row = await db.fetchrow(
+            """
+            SELECT id
+            FROM patients
+            WHERE patient_user_id = $1::uuid
+              AND deleted_at IS NULL
+            """,
+            str(user["id"]),
+        )
+        if row:
+            patient_id = str(row["id"])
+
+    # ── Habeas Data ───────────────────────────────────────────────
     consent_row = await db.fetchrow(
         "SELECT id FROM consent WHERE user_id = $1::uuid",
         str(user["id"]),
@@ -43,16 +56,18 @@ async def login(
     needs_habeas = consent_row is None
 
     ip = request.client.host if request.client else None
-    await log_audit(db, str(user["id"]), user["role"], "LOGIN", "User",
-                    str(user["id"]), ip)
+    await log_audit(
+        db, str(user["id"]), user["role"],
+        "LOGIN", "User", str(user["id"]), ip
+    )
 
     return LoginResponse(
         access_token=token,
         role=user["role"],
         user_id=str(user["id"]),
+        patient_id=patient_id,   # 👈 NUEVO
         needs_habeas_data=needs_habeas,
     )
-
 
 @router.post("/logout", status_code=204)
 async def logout(

@@ -9,6 +9,13 @@ import './Login.css'
 const ROLE_ICONS  = { ADMIN: '⬡', MEDICO: '✚', PACIENTE: '◎' }
 const ROLE_COLORS = { ADMIN: '#f59e0b', MEDICO: '#38bdf8', PACIENTE: '#10d48a' }
 
+// ── Helper: ruta destino según rol ────────────────────────────────────────────
+function roleHome(role) {
+  if (role === 'PACIENTE') return '/my-profile'
+  if (role === 'ADMIN')    return '/admin'
+  return '/dashboard'
+}
+
 export default function Login() {
   const [accessKey, setAccessKey] = useState('')
   const [permKey,   setPermKey]   = useState('')
@@ -17,10 +24,10 @@ export default function Login() {
   const { setAuth, token, role, needsHabeas } = useAuthStore()
   const navigate = useNavigate()
 
-  // Already logged in
+  // Already logged in — redirige según su rol
   useEffect(() => {
-    if (token && !needsHabeas) navigate('/dashboard', { replace: true })
-  }, [token, needsHabeas, navigate])
+    if (token && !needsHabeas) navigate(roleHome(role), { replace: true })
+  }, [token, needsHabeas, navigate, role])
 
   const handleLogin = async (e) => {
     e.preventDefault()
@@ -32,7 +39,7 @@ export default function Login() {
       setAuthed(true)
       if (!data.needs_habeas_data) {
         toast.success(`Bienvenido — ${data.role}`)
-        navigate('/dashboard', { replace: true })
+        navigate(roleHome(data.role?.toUpperCase()), { replace: true })  // ✅ fix
       }
     } catch (err) {
       const msg = err.response?.status === 401
@@ -138,8 +145,8 @@ export default function Login() {
         Protegido bajo Ley 1581/2012 · Datos cifrados AES-256 · Sistema auditado · FHIR R4
       </footer>
 
-      {/* Habeas Data modal — blocks if first login */}
-      <HabeasModal onAccepted={() => navigate('/dashboard', { replace: true })} />
+      {/* Habeas Data modal — redirige según rol tras aceptar */}
+      <HabeasModal onAccepted={() => navigate(roleHome(role), { replace: true })} />  {/* ✅ fix */}
     </div>
   )
 }

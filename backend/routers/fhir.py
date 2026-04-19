@@ -19,6 +19,9 @@ import urllib3
 import boto3
 from botocore.config import Config
 
+# ── Import del helper de creación de usuario paciente ────────────────────────
+from routers.admin import create_patient_user
+
 router = APIRouter(prefix="/fhir", tags=["FHIR"])
 
 
@@ -115,9 +118,6 @@ async def list_patients(
         where, params = "WHERE p.deleted_at IS NULL", []
     elif user["role"] == "MEDICO":
         # ── FIX: Médico SOLO ve pacientes asignados explícitamente ────────────
-        # Se eliminó "p.owner_id = $1::uuid OR" para que los médicos
-        # únicamente vean pacientes que el admin les asignó (o que crearon,
-        # los cuales quedan auto-asignados en create_patient).
         where = """WHERE p.deleted_at IS NULL AND
             EXISTS (
                 SELECT 1 FROM patient_assignments pa
@@ -125,7 +125,8 @@ async def list_patients(
             )"""
         params = [str(user["id"])]
     else:
-        where, params = "WHERE p.deleted_at IS NULL AND p.owner_id = $1::uuid", [str(user["id"])]
+        # PACIENTE: solo ve su propio registro, buscando por patient_user_id
+        where, params = "WHERE p.deleted_at IS NULL AND p.patient_user_id = $1::uuid", [str(user["id"])]
 
     count_row = await db.fetchrow(f"SELECT COUNT(*) FROM patients p {where}", *params)
     rows = await db.fetch(
@@ -407,12 +408,12 @@ async def get_risk_assessment(
     )
     if not row:
         raise HTTPException(404, "RiskReport no encontrado")
-    _check_subject_access(user, str(row["patient_id"]))
+    await _check_subject_access(user, str(row["patient_id"]), db)
     return _risk_to_fhir(row)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# PATIENT FULL
+# PATIENT FULL — crea paciente + observaciones + usuario PACIENTE en un solo paso
 # ──────────────────────────────────────────────────────────────────────────────
 class ObsItem(BaseModel):
     loinc_code: str
@@ -433,8 +434,16 @@ async def create_patient_full(
     user: dict = Depends(require_medico),
     db: asyncpg.Connection = Depends(get_db),
 ):
+    """
+    Crea paciente + observaciones en un solo request.
+    Genera automáticamente un usuario PACIENTE con sus API keys
+    y lo vincula al registro del paciente.
+    Las credenciales se devuelven UNA SOLA VEZ en la respuesta.
+    """
+    # ── 1. Cifrar documento e insertar paciente ───────────────────────────────
     enc_doc = await encrypt_value(db, body.identification_doc)
     birth_date_obj = datetime.strptime(body.birth_date, "%Y-%m-%d").date()
+
     row = await db.fetchrow(
         """INSERT INTO patients (owner_id, name, birth_date, identification_doc, ground_truth)
            VALUES ($1::uuid, $2, $3, $4, $5)
@@ -443,7 +452,7 @@ async def create_patient_full(
     )
     pid = str(row["id"])
 
-    # ── FIX: auto-asignar al médico que crea el paciente ────────────────────
+    # ── 2. Auto-asignar al médico que crea el paciente ────────────────────────
     await db.execute(
         """INSERT INTO patient_assignments (patient_id, doctor_id, assigned_by)
            VALUES ($1::uuid, $2::uuid, $2::uuid)
@@ -451,6 +460,15 @@ async def create_patient_full(
         pid, str(user["id"]),
     )
 
+    # ── 3. Crear usuario PACIENTE y vincularlo ────────────────────────────────
+    new_user = await create_patient_user(db, body.name, pid)
+
+    await db.execute(
+        "UPDATE patients SET patient_user_id = $1::uuid WHERE id = $2::uuid",
+        str(new_user["id"]), pid,
+    )
+
+    # ── 4. Insertar observaciones LOINC ──────────────────────────────────────
     obs_created = []
     for obs in body.observations:
         obs_row = await db.fetchrow(
@@ -460,11 +478,19 @@ async def create_patient_full(
             pid, obs.loinc_code, obs.value, obs.unit,
         )
         obs_created.append(dict(obs_row))
+
+    # ── 5. Audit ──────────────────────────────────────────────────────────────
+    ip = request.client.host if request.client else None
     await log_audit(
         db, str(user["id"]), user["role"], "CREATE_PATIENT", "Patient",
-        pid, request.client.host if request.client else None,
-        detail={"observations_count": len(obs_created)},
+        pid, ip,
+        detail={
+            "observations_count": len(obs_created),
+            "patient_user_id": str(new_user["id"]),
+        },
     )
+
+    # ── 6. Respuesta — credenciales solo se muestran aquí ────────────────────
     return {
         "resourceType": "Patient",
         "id": pid,
@@ -472,6 +498,15 @@ async def create_patient_full(
         "birthDate": str(row["birth_date"]),
         "meta": {"createdAt": row["created_at"].isoformat()},
         "observations_created": len(obs_created),
+        # Credenciales del usuario PACIENTE — guardar antes de cerrar el modal
+        "patient_user": {
+            "user_id": str(new_user["id"]),
+            "username": new_user["username"],
+            "role": "PACIENTE",
+            "access_key": new_user["access_key"],
+            "permission_key": new_user["permission_key"],
+            "note": "Guarda estas claves — no se volverán a mostrar",
+        },
     }
 
 
@@ -575,20 +610,22 @@ def _risk_to_fhir(row) -> dict:
     }
 
 def _check_patient_access(user: dict, row):
-    """Acceso síncrono: solo verifica owner. Para MEDICO con asignación usar _check_patient_access_db."""
+    """Acceso síncrono: solo verifica owner. Para MEDICO con asignación usar _check_medico_access."""
     if user["role"] == "ADMIN":
         return
     if user["role"] == "PACIENTE" and str(row["owner_id"]) != str(user["id"]):
         raise HTTPException(403, "Acceso denegado a este paciente")
-    # MEDICO: owner check síncrono (la verificación por asignación se hace en get_patient)
 
 
 async def _check_medico_access(user: dict, row, db: asyncpg.Connection):
-    """Para MEDICO: verifica asignación en patient_assignments."""
+    """
+    ADMIN  → acceso total.
+    MEDICO → solo pacientes asignados en patient_assignments.
+    PACIENTE → solo su propio registro (por patient_user_id).
+    """
     if user["role"] == "ADMIN":
         return
     if user["role"] == "MEDICO":
-        # ── FIX: solo verifica por asignación, no por owner_id ───────────────
         assigned = await db.fetchval(
             "SELECT 1 FROM patient_assignments WHERE patient_id = $1::uuid AND doctor_id = $2::uuid",
             str(row["id"]), str(user["id"])
@@ -596,9 +633,64 @@ async def _check_medico_access(user: dict, row, db: asyncpg.Connection):
         if not assigned:
             raise HTTPException(403, "No tiene acceso a este paciente")
         return
-    if user["role"] == "PACIENTE" and str(row["owner_id"]) != str(user["id"]):
-        raise HTTPException(403, "Acceso denegado a este paciente")
+    if user["role"] == "PACIENTE":
+        # Verifica por patient_user_id (columna agregada en migración)
+        linked = await db.fetchval(
+            "SELECT 1 FROM patients WHERE id = $1::uuid AND patient_user_id = $2::uuid AND deleted_at IS NULL",
+            str(row["id"]), str(user["id"])
+        )
+        if not linked:
+            raise HTTPException(403, "Acceso denegado a este paciente")
 
-def _check_subject_access(user: dict, subject_id: str):
-    if user["role"] == "PACIENTE" and str(user["id"]) != subject_id:
-        raise HTTPException(403, "Solo puede ver sus propios datos")
+async def _check_subject_access(user: dict, subject_id: str, db: asyncpg.Connection):
+    """
+    ADMIN → acceso total
+    MEDICO → (opcional: puedes validar asignación si quieres endurecer)
+    PACIENTE → solo puede ver su propio patient_id vía patient_user_id
+    """
+    if user["role"] == "ADMIN":
+        return
+
+    if user["role"] == "PACIENTE":
+        linked = await db.fetchval(
+            """
+            SELECT 1
+            FROM patients
+            WHERE id = $1::uuid
+              AND patient_user_id = $2::uuid
+              AND deleted_at IS NULL
+            """,
+            subject_id,
+            str(user["id"]),
+        )
+        if not linked:
+            raise HTTPException(403, "Solo puede ver sus propios datos")
+
+@router.get("/Patient/me")
+async def get_my_patient(
+    user: dict = Depends(require_authenticated),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    try:
+        row = await db.fetchrow(
+            """
+            SELECT *
+            FROM patients
+            WHERE patient_user_id = $1::uuid
+              AND deleted_at IS NULL
+            """,
+            str(user["id"]),
+        )
+
+        if not row:
+            return {"debug": "NO PATIENT FOUND", "user_id": str(user["id"])}
+
+        # 🔥 imprime para debug
+        print("ROW:", row)
+
+        row = dict(row)
+
+        return row
+
+    except Exception as e:
+        return {"error": str(e), "type": str(type(e))}

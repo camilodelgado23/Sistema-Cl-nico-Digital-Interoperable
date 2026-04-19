@@ -1,19 +1,72 @@
 """
 routers/admin.py — Panel Admin
-CRUD usuarios, audit log filtrable + exportar CSV/JSON, estadísticas.
+CRUD usuarios, audit log filtrable + exportar CSV/JSON, estadísticas,
+migración masiva de pacientes existentes a usuarios con rol PACIENTE.
 Solo rol ADMIN.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
-import asyncpg, csv, io, json, secrets
+import asyncpg, csv, io, json, secrets, re
 
 from core.config import get_db
 from core.auth import require_admin, hash_password
 from core.audit import log_audit
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# HELPER: crear usuario de paciente (reutilizable desde admin y desde fhir)
+# ──────────────────────────────────────────────────────────────────────────────
+async def create_patient_user(
+    db: asyncpg.Connection,
+    patient_name: str,
+    patient_id: str,
+) -> dict:
+    """
+    Genera un usuario con rol PACIENTE derivado del nombre del paciente.
+    Retorna dict con: id, username, access_key, permission_key
+    El llamador es responsable de actualizar patients.patient_user_id.
+    """
+    # Generar username base desde el nombre (sin tildes, sin espacios)
+    base = _slugify(patient_name)[:20] or "paciente"
+
+    # Garantizar unicidad añadiendo sufijo si ya existe
+    username = base
+    suffix = 1
+    while True:
+        exists = await db.fetchval(
+            "SELECT id FROM users WHERE username = $1 AND deleted_at IS NULL",
+            username,
+        )
+        if not exists:
+            break
+        username = f"{base}{suffix}"
+        suffix += 1
+
+    access_key = secrets.token_hex(16)
+    permission_key = secrets.token_hex(16)
+    # Contraseña aleatoria segura (no se entrega al usuario — usa las API keys)
+    temp_password = secrets.token_urlsafe(16) + "Aa1!"
+    ph = hash_password(temp_password)
+
+    row = await db.fetchrow(
+        """INSERT INTO users (username, password_hash, role, access_key, permission_key)
+           VALUES ($1, $2, 'PACIENTE', $3, $4)
+           RETURNING id, username, role, access_key, permission_key, created_at""",
+        username, ph, access_key, permission_key,
+    )
+    return dict(row)
+
+
+def _slugify(text: str) -> str:
+    """Convierte nombre a slug minúsculas sin tildes ni espacios."""
+    replacements = str.maketrans("áéíóúÁÉÍÓÚñÑüÜ", "aeiouAEIOUnNuU")
+    text = text.translate(replacements)
+    text = re.sub(r"[^a-zA-Z0-9]", "", text)
+    return text.lower()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -59,13 +112,12 @@ async def create_user(
 ):
     if body.role not in ("ADMIN", "MEDICO", "PACIENTE"):
         raise HTTPException(400, "Rol inválido")
-    # Password policy: ≥10 chars, uppercase, digit, symbol
     _validate_password(body.password)
 
     access_key = secrets.token_hex(16)
     permission_key = secrets.token_hex(16)
     ph = hash_password(body.password[:72])
-    
+
     row = await db.fetchrow(
         """INSERT INTO users (username, password_hash, role, access_key, permission_key)
            VALUES ($1, $2, $3, $4, $5)
@@ -148,6 +200,69 @@ async def regenerate_api_keys(
         new_access, new_perm, uid,
     )
     return {"access_key": new_access, "permission_key": new_perm}
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# MIGRACIÓN MASIVA: pacientes existentes → usuarios PACIENTE
+# ──────────────────────────────────────────────────────────────────────────────
+@router.post("/migrate-patients-to-users")
+async def migrate_patients_to_users(
+    request: Request,
+    user: dict = Depends(require_admin),
+    db: asyncpg.Connection = Depends(get_db),
+):
+    """
+    Recorre todos los pacientes que NO tienen patient_user_id (sin usuario asociado)
+    y crea un usuario PACIENTE para cada uno.
+    Devuelve la lista de credenciales generadas — guardarlas de inmediato,
+    las claves NO se volverán a mostrar.
+    """
+    # Pacientes sin usuario vinculado
+    patients = await db.fetch(
+        """SELECT id, name FROM patients
+           WHERE patient_user_id IS NULL
+             AND deleted_at IS NULL
+           ORDER BY created_at""",
+    )
+
+    if not patients:
+        return {"migrated": 0, "message": "Todos los pacientes ya tienen usuario.", "entry": []}
+
+    results = []
+    for p in patients:
+        patient_id = str(p["id"])
+        patient_name = p["name"] or f"paciente_{patient_id[:8]}"
+
+        # Crear usuario
+        new_user = await create_patient_user(db, patient_name, patient_id)
+
+        # Vincular al paciente
+        await db.execute(
+            "UPDATE patients SET patient_user_id = $1::uuid WHERE id = $2::uuid",
+            str(new_user["id"]), patient_id,
+        )
+
+        await log_audit(
+            db, str(user["id"]), user["role"],
+            "MIGRATE_PATIENT_USER", "Patient",
+            patient_id,
+            request.client.host if request.client else None,
+            detail={"new_user_id": str(new_user["id"]), "username": new_user["username"]},
+        )
+
+        results.append({
+            "patient_id": patient_id,
+            "patient_name": patient_name,
+            "username": new_user["username"],
+            "access_key": new_user["access_key"],
+            "permission_key": new_user["permission_key"],
+        })
+
+    return {
+        "migrated": len(results),
+        "message": f"Se crearon {len(results)} usuario(s) PACIENTE.",
+        "entry": results,
+    }
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -311,14 +426,12 @@ async def create_assignment(
     user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    # Validar que el doctor existe y tiene rol MEDICO
     doctor = await db.fetchrow(
         "SELECT id, role FROM users WHERE id = $1::uuid AND deleted_at IS NULL", body.doctor_id
     )
     if not doctor or doctor["role"] != "MEDICO":
         raise HTTPException(400, "El usuario seleccionado no es un médico activo")
 
-    # Validar que el paciente existe
     patient = await db.fetchrow(
         "SELECT id FROM patients WHERE id = $1::uuid AND deleted_at IS NULL", body.patient_id
     )
@@ -367,7 +480,6 @@ async def list_doctors(
     user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    """Lista médicos activos para los dropdowns del panel de asignaciones."""
     rows = await db.fetch(
         "SELECT id, username FROM users WHERE role = 'MEDICO' AND deleted_at IS NULL AND is_active = TRUE ORDER BY username"
     )
@@ -379,7 +491,6 @@ async def list_all_patients(
     user: dict = Depends(require_admin),
     db: asyncpg.Connection = Depends(get_db),
 ):
-    """Lista todos los pacientes activos para los dropdowns del panel de asignaciones."""
     rows = await db.fetch(
         "SELECT id, name FROM patients WHERE deleted_at IS NULL ORDER BY name"
     )
@@ -413,8 +524,8 @@ def _audit_row(row) -> dict:
         "detail": row["detail"],
     }
 
+
 def _validate_password(password: str):
-    import re
     if len(password) < 10:
         raise HTTPException(400, "Contraseña debe tener al menos 10 caracteres")
     if not re.search(r"[A-Z]", password):

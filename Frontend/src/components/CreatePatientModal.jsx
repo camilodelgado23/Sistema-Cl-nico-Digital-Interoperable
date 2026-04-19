@@ -1,10 +1,6 @@
 // frontend/src/components/CreatePatientModal.jsx
 // Modal para que el médico cree un paciente completo con todas sus observaciones.
-// Úsalo en tu Dashboard o en la vista de pacientes del médico.
-//
-// Uso:
-//   import CreatePatientModal from "./CreatePatientModal";
-//   <CreatePatientModal onClose={() => setOpen(false)} onCreated={(patient) => reload()} />
+// Al crear exitosamente muestra las credenciales del usuario PACIENTE generado.
 
 import { useState } from "react";
 
@@ -15,30 +11,97 @@ function getAuthHeaders() {
   return { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 }
 
-// Campos LOINC con nombres, unidades y rangos normales de referencia
 const LOINC_FIELDS = [
-  { loinc: "2339-0",  name: "Glucosa",              unit: "mg/dL",   min: 50,  max: 500,  placeholder: "ej. 120" },
-  { loinc: "55284-4", name: "Presión arterial",      unit: "mmHg",    min: 40,  max: 200,  placeholder: "ej. 80" },
-  { loinc: "39156-5", name: "BMI",                   unit: "kg/m2",   min: 10,  max: 70,   placeholder: "ej. 28.5" },
-  { loinc: "14749-6", name: "Insulina",              unit: "uU/mL",   min: 0,   max: 800,  placeholder: "ej. 80" },
-  { loinc: "21612-7", name: "Edad",                  unit: "a",       min: 1,   max: 120,  placeholder: "ej. 35" },
-  { loinc: "11996-6", name: "Embarazos",             unit: "{count}", min: 0,   max: 20,   placeholder: "ej. 2" },
-  { loinc: "39106-0", name: "Grosor de piel",        unit: "mm",      min: 0,   max: 100,  placeholder: "ej. 23" },
-  { loinc: "33914-3", name: "Pedigree diabetes",     unit: "{score}", min: 0,   max: 3,    placeholder: "ej. 0.627" },
+  { loinc: "2339-0",  name: "Glucosa",          unit: "mg/dL",   min: 50,  max: 500, placeholder: "ej. 120" },
+  { loinc: "55284-4", name: "Presión arterial",  unit: "mmHg",    min: 40,  max: 200, placeholder: "ej. 80" },
+  { loinc: "39156-5", name: "BMI",               unit: "kg/m2",   min: 10,  max: 70,  placeholder: "ej. 28.5" },
+  { loinc: "14749-6", name: "Insulina",          unit: "uU/mL",   min: 0,   max: 800, placeholder: "ej. 80" },
+  { loinc: "21612-7", name: "Edad",              unit: "a",       min: 1,   max: 120, placeholder: "ej. 35" },
+  { loinc: "11996-6", name: "Embarazos",         unit: "{count}", min: 0,   max: 20,  placeholder: "ej. 2" },
+  { loinc: "39106-0", name: "Grosor de piel",    unit: "mm",      min: 0,   max: 100, placeholder: "ej. 23" },
+  { loinc: "33914-3", name: "Pedigree diabetes", unit: "{score}", min: 0,   max: 3,   placeholder: "ej. 0.627" },
 ];
 
+// ── Pantalla de credenciales (igual al modal de admin) ────────────────────────
+function CredentialsScreen({ patient, onClose }) {
+  const u = patient.patient_user;
+  const [copied, setCopied] = useState(null);
+
+  const copy = (value, field) => {
+    navigator.clipboard.writeText(value);
+    setCopied(field);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
+  return (
+    <div style={styles.overlay}>
+      <div style={{ ...styles.modal, maxWidth: 480 }}>
+        <div style={styles.header}>
+          <h2 style={styles.title}>Paciente creado</h2>
+        </div>
+
+        <div style={styles.body}>
+          {/* Banner éxito */}
+          <div style={styles.successBanner}>
+            ✅ <strong>Paciente y usuario creados exitosamente</strong>
+          </div>
+
+          {/* Info del paciente */}
+          <div style={styles.infoBox}>
+            <div style={styles.infoRow}><span style={styles.infoLabel}>Paciente</span><span>{patient.name}</span></div>
+            <div style={styles.infoRow}><span style={styles.infoLabel}>Usuario</span><span style={{ color: "#06b6d4" }}>{u.username}</span></div>
+            <div style={styles.infoRow}><span style={styles.infoLabel}>Rol</span><span>{u.role}</span></div>
+          </div>
+
+          {/* Aviso claves */}
+          <div style={styles.warningBox}>
+            🔑 <strong>Guarda estas claves — no se volverán a mostrar</strong>
+          </div>
+
+          {/* Claves */}
+          {[
+            { label: "X-Access-Key", value: u.access_key },
+            { label: "X-Permission-Key", value: u.permission_key },
+          ].map(({ label, value }) => (
+            <div key={label} style={{ marginBottom: 12 }}>
+              <div style={styles.infoLabel}>{label}</div>
+              <div style={styles.keyRow}>
+                <code style={styles.keyCode}>{value}</code>
+                <button
+                  style={styles.copyBtn}
+                  onClick={() => copy(value, label)}
+                >
+                  {copied === label ? "✓" : "Copiar"}
+                </button>
+              </div>
+            </div>
+          ))}
+
+          <p style={{ fontSize: 12, color: "#64748b", marginTop: 8 }}>
+            El paciente usa estas claves para iniciar sesión en el sistema.
+          </p>
+        </div>
+
+        <div style={styles.footer}>
+          <button onClick={onClose} style={styles.submitBtn}>
+            Cerrar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Modal principal ───────────────────────────────────────────────────────────
 export default function CreatePatientModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({
-    name: "",
-    birth_date: "",
-    identification_doc: "",
-  });
+  const [form, setForm] = useState({ name: "", birth_date: "", identification_doc: "" });
   const [observations, setObservations] = useState(
     Object.fromEntries(LOINC_FIELDS.map((f) => [f.loinc, ""]))
   );
-  const [errors, setErrors] = useState({});
+  const [errors, setErrors]       = useState({});
   const [submitting, setSubmitting] = useState(false);
-  const [apiError, setApiError] = useState(null);
+  const [apiError, setApiError]   = useState(null);
+  const [createdPatient, setCreatedPatient] = useState(null); // ← credenciales
 
   function setField(key, val) {
     setForm((p) => ({ ...p, [key]: val }));
@@ -54,7 +117,6 @@ export default function CreatePatientModal({ onClose, onCreated }) {
     if (!form.name.trim()) errs.name = "Nombre requerido";
     if (!form.birth_date) errs.birth_date = "Fecha de nacimiento requerida";
     if (!form.identification_doc.trim()) errs.identification_doc = "Documento requerido";
-    // Al menos glucosa debe estar
     if (!observations["2339-0"]) errs.glucose = "Glucosa es requerida para el análisis ML";
     return errs;
   }
@@ -66,14 +128,9 @@ export default function CreatePatientModal({ onClose, onCreated }) {
     setSubmitting(true);
     setApiError(null);
 
-    // Construir lista de observaciones con valores ingresados
     const obs = LOINC_FIELDS
-      .filter((f) => observations[f.loinc] !== "" && observations[f.loinc] !== undefined)
-      .map((f) => ({
-        loinc_code: f.loinc,
-        value: parseFloat(observations[f.loinc]),
-        unit: f.unit,
-      }))
+      .filter((f) => observations[f.loinc] !== "")
+      .map((f) => ({ loinc_code: f.loinc, value: parseFloat(observations[f.loinc]), unit: f.unit }))
       .filter((o) => !isNaN(o.value));
 
     try {
@@ -93,12 +150,23 @@ export default function CreatePatientModal({ onClose, onCreated }) {
       }
       const patient = await r.json();
       onCreated && onCreated(patient);
-      onClose && onClose();
+      // Mostrar pantalla de credenciales en vez de cerrar de inmediato
+      setCreatedPatient(patient);
     } catch (e) {
       setApiError(e.message);
     } finally {
       setSubmitting(false);
     }
+  }
+
+  // Si ya se creó, mostrar pantalla de credenciales
+  if (createdPatient) {
+    return (
+      <CredentialsScreen
+        patient={createdPatient}
+        onClose={onClose}
+      />
+    );
   }
 
   return (
@@ -115,10 +183,7 @@ export default function CreatePatientModal({ onClose, onCreated }) {
           <section style={styles.section}>
             <h3 style={styles.sectionTitle}>Datos personales</h3>
             <div style={styles.fieldGrid}>
-              <Field
-                label="Nombre completo *"
-                error={errors.name}
-              >
+              <Field label="Nombre completo *" error={errors.name}>
                 <input
                   style={inputStyle(errors.name)}
                   value={form.name}
@@ -151,6 +216,12 @@ export default function CreatePatientModal({ onClose, onCreated }) {
             </div>
           </section>
 
+          {/* Nota sobre usuario automático */}
+          <div style={styles.infoNote}>
+            👤 Se creará automáticamente un usuario con rol <strong>PACIENTE</strong> para
+            que el paciente pueda acceder al sistema con sus credenciales.
+          </div>
+
           {/* Observaciones clínicas LOINC */}
           <section style={styles.section}>
             <h3 style={styles.sectionTitle}>
@@ -160,9 +231,7 @@ export default function CreatePatientModal({ onClose, onCreated }) {
             <p style={styles.hint}>
               Complete los valores de laboratorio. Al menos Glucosa es requerida para el análisis ML.
             </p>
-            {errors.glucose && (
-              <p style={styles.fieldError}>{errors.glucose}</p>
-            )}
+            {errors.glucose && <p style={styles.fieldError}>{errors.glucose}</p>}
             <div style={styles.obsGrid}>
               {LOINC_FIELDS.map((f) => (
                 <div key={f.loinc} style={styles.obsField}>
@@ -186,7 +255,6 @@ export default function CreatePatientModal({ onClose, onCreated }) {
             </div>
           </section>
 
-          {/* Error de API */}
           {apiError && (
             <div style={styles.apiError}>
               <strong>Error:</strong> {apiError}
@@ -281,6 +349,11 @@ const styles = {
     background: "#450a0a", color: "#fca5a5", borderRadius: 8,
     padding: "10px 14px", fontSize: 13, marginTop: 8,
   },
+  infoNote: {
+    background: "#0e2a3a", color: "#7dd3fc", borderRadius: 8,
+    padding: "10px 14px", fontSize: 13, marginBottom: 20,
+    border: "1px solid #0369a1",
+  },
   footer: {
     display: "flex", justifyContent: "flex-end", gap: 10,
     padding: "16px 24px", borderTop: "1px solid #1e293b",
@@ -293,5 +366,38 @@ const styles = {
     background: "#06b6d4", color: "#000", border: "none",
     padding: "9px 24px", borderRadius: 8, cursor: "pointer",
     fontWeight: 600, fontSize: 14,
+  },
+  // Pantalla de credenciales
+  successBanner: {
+    background: "#052e16", color: "#86efac", borderRadius: 8,
+    padding: "10px 14px", fontSize: 14, marginBottom: 16,
+    border: "1px solid #166534",
+  },
+  warningBox: {
+    background: "#1c1007", color: "#fbbf24", borderRadius: 8,
+    padding: "10px 14px", fontSize: 13, marginBottom: 16,
+    border: "1px solid #92400e",
+  },
+  infoBox: {
+    background: "#0f172a", borderRadius: 8, padding: "12px 14px",
+    marginBottom: 16, border: "1px solid #1e293b",
+  },
+  infoRow: {
+    display: "flex", justifyContent: "space-between",
+    padding: "4px 0", fontSize: 14, color: "#e2e8f0",
+  },
+  infoLabel: { color: "#64748b", fontSize: 12, marginBottom: 4 },
+  keyRow: {
+    display: "flex", alignItems: "center", gap: 8,
+    background: "#1e293b", borderRadius: 8, padding: "8px 12px",
+  },
+  keyCode: {
+    flex: 1, color: "#06b6d4", fontFamily: "monospace",
+    fontSize: 13, wordBreak: "break-all",
+  },
+  copyBtn: {
+    background: "#334155", color: "#e2e8f0", border: "none",
+    padding: "4px 10px", borderRadius: 6, cursor: "pointer", fontSize: 12,
+    whiteSpace: "nowrap",
   },
 };
