@@ -114,24 +114,32 @@ function CriticalModal({ report, onClose }) {
 }
 
 // ── Tab Datos ─────────────────────────────────────────────────────────────────
-function TabDatos({ patient }) {
+function TabDatos({ patient, role }) {
+  const isAdmin = role === 'ADMIN'
   return (
     <div className="grid-2">
       <div className="card">
         <div className="card-header"><span className="card-icon">👤</span><h3>Datos FHIR Patient</h3></div>
+        {isAdmin && (
+          <div style={{marginBottom:'0.75rem',padding:'0.625rem 0.875rem',
+            background:'rgba(234,179,8,0.08)',border:'1px solid rgba(234,179,8,0.25)',
+            borderRadius:'var(--radius-sm)',fontSize:'0.8rem',color:'#fde68a',display:'flex',gap:'0.5rem',alignItems:'center'}}>
+            🔒 Vista de Administrador — información clínica protegida
+          </div>
+        )}
         <div className="data-list">
           {[
             ['Nombre completo', patient.name],
-            ['Fecha de nac.', patient.birthDate],
-            ['Edad', calcAge(patient.birthDate) + ' años'],
-            ['ID Paciente', patient.id],
-            ['Doc. Identidad', patient.identification_doc || '***'],
-            ['Estado', patient.active!==false?'Activo':'Inactivo'],
-            ['Creado', patient.meta?.createdAt ? new Date(patient.meta.createdAt).toLocaleDateString('es-CO') : '—'],
+            ['Fecha de nac.',   isAdmin ? '••••••••' : patient.birthDate],
+            ['Edad',            isAdmin ? '••' : calcAge(patient.birthDate) + ' años'],
+            ['ID Paciente',     patient.id],
+            ['Doc. Identidad',  isAdmin ? '••••••••' : (patient.identification_doc || '—')],
+            ['Estado',          patient.active!==false?'Activo':'Inactivo'],
+            ['Creado',          isAdmin ? '••••••••' : (patient.meta?.createdAt ? new Date(patient.meta.createdAt).toLocaleDateString('es-CO') : '—')],
           ].map(([l,v])=>(
             <div key={l}>
               <dt style={{fontSize:'0.75rem',color:'var(--text-tertiary)',fontFamily:'var(--font-mono)',textTransform:'uppercase',letterSpacing:'0.06em'}}>{l}</dt>
-              <dd>{v}</dd>
+              <dd style={isAdmin && l!=='Nombre completo' && l!=='ID Paciente' && l!=='Estado' ? {color:'var(--text-tertiary)',letterSpacing:'0.15em'} : {}}>{v}</dd>
             </div>
           ))}
         </div>
@@ -151,16 +159,35 @@ function TabDatos({ patient }) {
 }
 
 // ── Tab Observaciones ─────────────────────────────────────────────────────────
-function TabObservaciones({ patientId }) {
+function TabObservaciones({ patientId, role }) {
   const [obs, setObs]     = useState([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
+    if (role === 'ADMIN') { setLoading(false); return }
     fhirAPI.listObservations(patientId)
       .then(r => setObs(r.data.entry || []))
       .catch(console.error)
       .finally(() => setLoading(false))
-  }, [patientId])
+  }, [patientId, role])
+
+  if (role === 'ADMIN') return (
+    <div className="tab-content">
+      <div style={{textAlign:'center',padding:'3rem 2rem',display:'flex',flexDirection:'column',
+        alignItems:'center',gap:'1rem'}}>
+        <span style={{fontSize:'2.5rem'}}>🔒</span>
+        <h3 style={{color:'var(--text-primary)',margin:0}}>Acceso restringido</h3>
+        <p style={{color:'var(--text-secondary)',fontSize:'0.9rem',maxWidth:400,lineHeight:1.6,margin:0}}>
+          Las observaciones clínicas solo pueden ser consultadas por el <strong>médico tratante</strong> o el <strong>propio paciente</strong>.
+        </p>
+        <div style={{padding:'0.625rem 1rem',background:'rgba(234,179,8,0.08)',
+          border:'1px solid rgba(234,179,8,0.25)',borderRadius:'var(--radius-sm)',
+          fontSize:'0.8rem',color:'#fde68a'}}>
+          🔒 Protegido · Ley 1581/2012
+        </div>
+      </div>
+    </div>
+  )
 
   if (loading) return <div className="loading-state">Cargando observaciones…</div>
   if (!obs.length) return <div className="empty-state">Sin observaciones LOINC registradas</div>
@@ -237,6 +264,7 @@ function TabImagenes({ patientId, role }) {
   const fileRef = useRef()
 
   const loadMedia = useCallback(async () => {
+    if (role === 'ADMIN') { setLoading(false); return }
     try {
       const r = await fhirAPI.listMedia(patientId)
       const entries = r.data.entry || []
@@ -246,7 +274,40 @@ function TabImagenes({ patientId, role }) {
       }
     } catch (e) { console.error(e) }
     finally { setLoading(false) }
-  }, [patientId])
+  }, [patientId, role])
+
+  useEffect(() => { loadMedia() }, [loadMedia])
+
+  // Cuando cambia la imagen seleccionada, obtener URL presignada
+  useEffect(() => {
+    if (!selected?.id) { setImgUrl(null); return }
+    setImgLoading(true)
+    fhirAPI.getMediaUrl(selected.id)
+      .then(r => setImgUrl(r.data.url))
+      .catch(e => {
+        console.error('Error obteniendo URL de imagen:', e)
+        setImgUrl(null)
+      })
+      .finally(() => setImgLoading(false))
+  }, [selected])
+
+  if (role === 'ADMIN') return (
+    <div className="tab-content">
+      <div style={{textAlign:'center',padding:'3rem 2rem',display:'flex',flexDirection:'column',
+        alignItems:'center',gap:'1rem'}}>
+        <span style={{fontSize:'2.5rem'}}>🖼️</span>
+        <h3 style={{color:'var(--text-primary)',margin:0}}>Acceso restringido</h3>
+        <p style={{color:'var(--text-secondary)',fontSize:'0.9rem',maxWidth:400,lineHeight:1.6,margin:0}}>
+          Las imágenes médicas solo pueden ser visualizadas por el <strong>médico tratante</strong> o el <strong>propio paciente</strong>.
+        </p>
+        <div style={{padding:'0.625rem 1rem',background:'rgba(234,179,8,0.08)',
+          border:'1px solid rgba(234,179,8,0.25)',borderRadius:'var(--radius-sm)',
+          fontSize:'0.8rem',color:'#fde68a'}}>
+          🔒 Protegido · Ley 1581/2012
+        </div>
+      </div>
+    </div>
+  )
 
   useEffect(() => { loadMedia() }, [loadMedia])
 
@@ -614,6 +675,7 @@ function TabReportes({ patientId, role, onRefreshPending }) {
   const [expanded,      setExpanded]      = useState(null)
   const [detailCache,   setDetailCache]   = useState({})
   const [detailLoading, setDetailLoading] = useState(false)
+  const isAdmin = role === 'ADMIN'
 
   const load = useCallback(async () => {
     try { const r = await fhirAPI.listRiskReports(patientId); setReports(r.data.entry||[]) }
@@ -621,6 +683,79 @@ function TabReportes({ patientId, role, onRefreshPending }) {
   }, [patientId])
 
   useEffect(()=>{load()},[load])
+
+  // ── Vista Admin — solo resumen ────────────────────────────────────────────
+  if (isAdmin) {
+    if (loading) return <div className="loading-state">Cargando reportes…</div>
+    const total   = reports.length
+    const signed  = reports.filter(r => !!r.signed_at).length
+    const pending = total - signed
+
+    return (
+      <div className="tab-content" style={{display:'flex',flexDirection:'column',gap:'1rem'}}>
+        <div style={{padding:'0.625rem 0.875rem',background:'rgba(234,179,8,0.08)',
+          border:'1px solid rgba(234,179,8,0.25)',borderRadius:'var(--radius-sm)',
+          fontSize:'0.8rem',color:'#fde68a',display:'flex',gap:'0.5rem',alignItems:'center'}}>
+          🔒 Vista de Administrador — solo resumen de reportes
+        </div>
+
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'1rem'}}>
+          {[
+            ['📋 Total',   total,   'var(--text-primary)'],
+            ['✅ Firmados', signed,  'var(--success)'],
+            ['⏳ Pendientes',pending,'var(--danger)'],
+          ].map(([label,val,color])=>(
+            <div key={label} className="card" style={{textAlign:'center',padding:'1.25rem'}}>
+              <div style={{fontSize:'2rem',fontWeight:800,color,fontFamily:'var(--font-display)'}}>{val}</div>
+              <div style={{fontSize:'0.8rem',color:'var(--text-tertiary)',marginTop:'0.25rem'}}>{label}</div>
+            </div>
+          ))}
+        </div>
+
+        {total > 0 && (
+          <div className="card" style={{padding:0,overflow:'hidden'}}>
+            <div className="card-header" style={{padding:'0.75rem 1rem 0'}}>
+              <span className="card-icon">📄</span><h3>Estado de reportes</h3>
+            </div>
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr><th>#</th><th>Modelo</th><th>Fecha</th><th>Estado firma</th></tr>
+                </thead>
+                <tbody>
+                  {reports.map((rep,i)=>{
+                    const signed = !!rep.signed_at
+                    return (
+                      <tr key={rep.id}>
+                        <td style={{color:'var(--text-tertiary)',fontSize:'0.8rem'}}>{i+1}</td>
+                        <td style={{fontFamily:'var(--font-mono)',fontSize:'0.8rem'}}>{rep.method||rep.model_type||'ML'}</td>
+                        <td style={{color:'var(--text-tertiary)',fontSize:'0.8rem'}}>
+                          {rep.occurrenceDateTime ? new Date(rep.occurrenceDateTime).toLocaleDateString('es-CO') : '—'}
+                        </td>
+                        <td>
+                          {signed ? (
+                            <span className="badge badge-success" style={{fontSize:'0.7rem'}}>✅ Firmado</span>
+                          ) : (
+                            <span className="badge" style={{fontSize:'0.7rem',background:'rgba(220,38,38,0.15)',
+                              color:'var(--danger)',border:'1px solid rgba(220,38,38,0.3)'}}>⏳ Pendiente</span>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div style={{padding:'0.625rem 0.875rem',background:'var(--surface-2)',
+          borderRadius:'var(--radius-sm)',fontSize:'0.8rem',color:'var(--text-tertiary)',lineHeight:1.5}}>
+          El contenido clínico de los reportes solo está disponible para el médico tratante.
+        </div>
+      </div>
+    )
+  }
 
   const fetchDetail = async (repId) => {
     if (detailCache[repId]) return
@@ -980,7 +1115,8 @@ function CreatePatientModal({ onClose, onCreated }) {
 export default function PatientDetail() {
   const { id }     = useParams()
   const navigate   = useNavigate()
-  const { user }   = useAuthStore()
+  const { role: userRole } = useAuthStore()
+  const user = { role: userRole }  // compatibilidad con referencias a user?.role
 
   const [patient, setPatient]     = useState(null)
   const [loading, setLoading]     = useState(true)
@@ -1022,8 +1158,11 @@ export default function PatientDetail() {
   if (!patient) return null
 
   const initials = patient.name?.split(' ').map(w=>w[0]).slice(0,2).join('')||'?'
+  const isAdmin = user?.role === 'ADMIN'
+
   const visibleTabs = TABS.filter(t=>{
     if (user?.role==='PACIENTE') return ['Datos','Observaciones','Reportes'].includes(t)
+    if (isAdmin) return ['Datos','Observaciones','Imágenes','Reportes'].includes(t)
     return true
   })
 
@@ -1033,7 +1172,7 @@ export default function PatientDetail() {
         <CriticalModal report={criticalReport} onClose={()=>{setCriticalReport(null);loadPatient()}}/>
       )}
 
-      {pending>0&&(
+      {pending>0&&!isAdmin&&(
         <div className="pending-banner">
           <span>⚠️</span>
           <span>Hay {pending} RiskReport{pending>1?'s':''} pendiente{pending>1?'s':''} de firma. Debe firmar antes de cerrar.</span>
@@ -1089,8 +1228,8 @@ export default function PatientDetail() {
         ))}
       </div>
 
-      {activeTab==='Datos'        &&<TabDatos patient={patient}/>}
-      {activeTab==='Observaciones'&&<TabObservaciones patientId={id}/>}
+      {activeTab==='Datos'        &&<TabDatos patient={patient} role={user?.role}/>}
+      {activeTab==='Observaciones'&&<TabObservaciones patientId={id} role={user?.role}/>}
       {activeTab==='Imágenes'     &&<TabImagenes patientId={id} role={user?.role}/>}
       {activeTab==='Análisis IA'  &&<TabAnalisis patientId={id} onCritical={rep=>setCriticalReport(rep)}/>}
       {activeTab==='Reportes'     &&<TabReportes patientId={id} role={user?.role} onRefreshPending={loadPatient}/>}

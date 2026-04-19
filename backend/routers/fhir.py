@@ -169,9 +169,14 @@ async def get_patient(
     await log_audit(db, str(user["id"]), user["role"], "VIEW_PATIENT", "Patient",
                     pid, request.client.host if request.client else None)
     fhir = _patient_to_fhir(row)
-    fhir["identification_doc"] = dec_doc if user["role"] != "PACIENTE" else "***"
-    if user["role"] == "PACIENTE":
+    if user["role"] == "ADMIN":
+        fhir["identification_doc"] = "••••••••"
+        fhir["birthDate"] = "••••••••"
+    elif user["role"] == "PACIENTE":
+        fhir["identification_doc"] = "***"
         fhir.pop("ground_truth", None)
+    else:
+        fhir["identification_doc"] = dec_doc
     return fhir
 
 
