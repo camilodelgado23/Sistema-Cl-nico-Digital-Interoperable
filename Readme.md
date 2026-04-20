@@ -33,8 +33,6 @@ docker compose up -d
 | DL Service | http://24.144.105.184:8002/docs | Endpoints del modelo de imágenes |
 | Orchestrator | http://24.144.105.184:8003/docs | Cola de inferencias |
 | MinIO Console | http://24.144.105.184:9001 | Ver imágenes almacenadas |
-| Mailhog | http://24.144.105.184:8025 | Ver emails de alertas críticas |
-| MLflow | http://24.144.105.184:5000 | Métricas de entrenamiento (apagado) |
 
 ---
 
