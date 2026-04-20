@@ -107,7 +107,3 @@ print(f'APTOS: {len(imgs)} imágenes, {len(df)} etiquetas')
 print(df.diagnosis.value_counts().sort_index())
 "
 ```
-
-## Retención de datos (Resolución 1995/1999)
-
-Los datos sintéticos generados por `scripts/seed_patients.py` se almacenan en PostgreSQL con soft-delete. La política de retención mínima es **15 años** desde la última actualización del registro, implementada mediante la columna `deleted_at` y backups automáticos de Render.
