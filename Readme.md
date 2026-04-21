@@ -18,8 +18,8 @@ cd ~/Sistema-Cl-nico-Digital-Interoperable
 docker compose up -d
 ```
 
-> ⚠️ MLflow y fhir-server están apagados por defecto (consumen demasiados recursos).
-> Si los necesitas: `docker compose start fhir-server mlflow`
+> ⚠️ MLflow está apagado por defecto (consume demasiados recursos).
+> Si los necesitas: `docker compose start mlflow`
 
 ---
 
