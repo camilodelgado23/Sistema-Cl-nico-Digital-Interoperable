@@ -171,3 +171,9 @@ Browser → nginx:80 → backend:8000 → orchestrator:8003 → ml-service:8001
                    → MinIO:9000 (imágenes)
                    → PostgreSQL/Render (datos clínicos)
 ```
+
+## 🎬 Demo del sistema
+
+> Haz clic en la imagen para ver el video de funcionamiento completo.
+
+[![Demo del Sistema Clínico Digital Interoperable](https://drive.google.com/thumbnail?id=1X6uRLiFU0J6djXTPMCcJfaDo_pIcHVQ1&sz=w1280)](https://drive.google.com/file/d/1X6uRLiFU0J6djXTPMCcJfaDo_pIcHVQ1/view?usp=sharing)
